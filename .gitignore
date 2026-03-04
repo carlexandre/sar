@@ -1,0 +1,24 @@
+# Ambientes Virtuais do Python
+venv/
+.venv/
+env/
+
+# Arquivos compilados do Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Variáveis de ambiente e certificados (Segurança)
+.env
+zabbix-certificado.crt
+*.key
+*.pem
+
+# Bancos de dados locais
+relatorios_popce.db
+*.sqlite3
+*.db
+
+# Arquivos gerados pelo sistema (Saídas)
+pdfs_gerados/

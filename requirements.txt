@@ -1,0 +1,7 @@
+pyzabbix
+pandas
+matplotlib
+fpdf2
+python-dotenv
+requests
+streamlit
