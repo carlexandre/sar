@@ -4,6 +4,7 @@ import requests
 import re
 import urllib3
 import base64
+import time
 from pyzabbix import ZabbixAPI
 from dotenv import load_dotenv
 from datetime import date, timedelta
@@ -17,13 +18,13 @@ if not os.path.exists(PASTA_PDFS):
     os.makedirs(PASTA_PDFS)
 
 # Configuração da Página
-st.set_page_config(page_title="SAR | PoP-CE", layout="wide", page_icon="assets/favicon/relatorio-de-lucro.png")
+st.set_page_config(page_title="SAR | PoP-CE", layout="wide", page_icon="assets/favicon/icons8-relatório-100.png")
 
 # --- 1. INJEÇÃO DE CSS E ÍCONES (FONT AWESOME) ---
 st.markdown("""
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <style>
-    /* Puxa a aplicação para o topo (reduz o espaço branco gigante padrão do Streamlit) */
+    /* Puxa a aplicação para o topo */
     .block-container {
         padding-top: 3rem !important;
         padding-bottom: 2rem !important;
@@ -49,13 +50,13 @@ st.markdown("""
     .custom-navbar {
         display: flex;
         align-items: center;
-        justify-content: space-between; /* Empurra o texto para a esquerda e o logo para a direita */
+        justify-content: space-between;
         width: 100%;
     }
     .nav-logo {
-        height: 40px; /* Altura reduzida para não cortar */
+        height: 40px; 
         width: auto;
-        object-fit: contain; /* Garante que as proporções da imagem são respeitadas */
+        object-fit: contain; 
     }
     .nav-text {
         display: flex;
@@ -119,7 +120,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- 2. CONTROLE DE ESTADO E URL (ROTEAMENTO) ---
-# Lendo a página diretamente da URL (permite usar o botão voltar do navegador)
 page = st.query_params.get("page", "Home")
 
 def ir_para(pagina):
@@ -149,6 +149,7 @@ def connect_zabbix():
         zapi.login(ZABBIX_USER, ZABBIX_PASSWORD)
         return zapi
     except Exception as e:
+        st.error(f"ERRO FATAL DE CONEXÃO COM O ZABBIX: {e}")
         return None
 
 def limpar_nome_host(nome_bruto):
@@ -156,8 +157,6 @@ def limpar_nome_host(nome_bruto):
     nome = re.sub(r'^RG\d+\s+-\s+', '', nome)
     return nome
 
-# Otimização de Performance: Cache dos dados do Zabbix por 5 minutos (300s)
-# O underline em _zapi diz ao Streamlit para não tentar fazer hash da conexão
 @st.cache_data(ttl=300, show_spinner=False)
 def get_hosts(_zapi):
     return _zapi.host.get(output=['hostid', 'name'], sortfield='name')
@@ -189,7 +188,6 @@ def renderizar_navbar():
         with open(caminho_branco, "rb") as f:
             b64_dark = base64.b64encode(f.read()).decode("utf-8")
             
-    # Constrói o HTML da Navbar
     html_navbar = f"""
     <a href="?page=Home" target="_self" class="navbar-link">
         <div class="custom-navbar">
@@ -206,24 +204,19 @@ def renderizar_navbar():
     """
     return html_navbar
 
-# A Navbar agora é estática e idêntica em todas as rotas
 st.markdown(renderizar_navbar(), unsafe_allow_html=True)
 st.markdown("<hr style='margin-top: 15px; margin-bottom: 30px; border-color: #555; opacity: 0.3;'>", unsafe_allow_html=True)
-
 
 # ==========================================
 # ROTEAMENTO DE PÁGINAS
 # ==========================================
 
 if page == "Home":
-    # --- PÁGINA INICIAL (CARDS) ---
     st.markdown("<h3 style='text-align: center; margin-bottom: 40px;'>Selecione um Módulo</h3>", unsafe_allow_html=True)
-    
-    # Criamos 3 colunas para os blocos/cards
     c1, c2, c3 = st.columns(3)
     
     with c1:
-        with st.container(border=True): # Borda nativa do Streamlit
+        with st.container(border=True):
             st.markdown("<div style='text-align: center;'><i class='fa-solid fa-file-pdf card-icon' style='color: #E74C3C;'></i></div>", unsafe_allow_html=True)
             st.markdown("<h4 style='text-align: center;' class='card-title'>Gerar Relatório</h4>", unsafe_allow_html=True)
             st.markdown("<p style='text-align: center;' class='card-desc'>Consulte o tráfego do Zabbix e exporte o documento PDF formatado.</p>", unsafe_allow_html=True)
@@ -250,7 +243,6 @@ if page == "Home":
                 st.rerun()
 
 elif page == "Gerar":
-    # --- PÁGINA: GERAR RELATÓRIO ---
     col_tit, col_btn = st.columns([8, 2])
     with col_tit:
         st.markdown("<h3 style='margin-bottom: 20px;'><i class='fa-solid fa-file-pdf' style='color: #E74C3C; margin-right: 10px;'></i> Gerar Novo Relatório</h3>", unsafe_allow_html=True)
@@ -374,7 +366,7 @@ elif page == "Gerar":
                         
                     db.registrar_relatorio(link_id_selecionado, infos['periodo'], caminho_completo)
 
-                    st.success("Relatório gerado e salvo no histórico com sucesso!")
+                    st.toast("Relatório gerado e salvo no histórico com sucesso!")
                     st.download_button(
                         label="Baixar PDF Agora",
                         data=bytes(pdf_bytes),
@@ -403,7 +395,8 @@ elif page == "Cadastros":
             if submit_grupo and novo_grupo:
                 sucesso, msg = db.adicionar_grupo(novo_grupo)
                 if sucesso:
-                    st.success(msg)
+                    st.toast(f"Grupo '{novo_grupo}' criado com sucesso!")
+                    time.sleep(1.2)
                     st.rerun()
                 else:
                     st.error(msg)
@@ -455,7 +448,8 @@ elif page == "Cadastros":
                             st.error("Erro: Nome em branco.")
                         else:
                             db.adicionar_link(dict_grupos[grupo_sel], nome_personalizado, host_id_real, dict_itens[item_down_sel], dict_itens[item_up_sel], cap)
-                            st.success(f"Link '{nome_personalizado}' vinculado com sucesso!")
+                            st.toast(f"Link '{nome_personalizado}' vinculado com sucesso!")
+                            time.sleep(1.5)
                             st.rerun()
             
             else:
@@ -514,7 +508,8 @@ elif page == "Cadastros":
                                     cursor.execute('UPDATE links SET grupo_id=?, nome_instituicao=?, host_id=?, item_down_id=?, item_up_id=?, capacidade_str=? WHERE id=?', 
                                                    (dict_grupos[grupo_sel], nome_personalizado, host_id_real, dict_itens[item_down_sel], dict_itens[item_up_sel], cap, link_id_selecionado))
                                     conn.commit()
-                                st.success("Atualizado com sucesso!")
+                                st.toast("Alterações salvas com sucesso!")
+                                time.sleep(1.2)
                                 st.rerun()
 
                         if submit_delete:
@@ -523,7 +518,8 @@ elif page == "Cadastros":
                                     cursor = conn.cursor()
                                     cursor.execute("DELETE FROM links WHERE id=?", (link_id_selecionado,))
                                     conn.commit()
-                                st.success("Link excluído!")
+                                st.toast("Link excluído com sucesso!")
+                                time.sleep(1.2)
                                 st.rerun()
                             except Exception as e:
                                 st.error("Não foi possível excluir. (Existem relatórios atrelados no histórico)")
@@ -541,23 +537,53 @@ elif page == "Historico":
     if not historico:
         st.info("Nenhum relatório foi gerado e salvo no banco de dados ainda.")
     else:
+        # Cruza os dados do histórico para descobrir o "Grupo" de cada Instituição via SQL direto no Pandas
+        with db.conectar() as conn:
+            links_raw = conn.execute("SELECT nome_instituicao, grupo_id FROM links").fetchall()
+            grupos_raw = conn.execute("SELECT id, nome FROM grupos").fetchall()
+            mapa_grupos = {g[0]: g[1] for g in grupos_raw}
+            mapa_inst_grupo = {l[0]: mapa_grupos.get(l[1], "Sem Grupo") for l in links_raw}
+
         df_hist = pd.DataFrame(historico, columns=["Data Geração", "Instituição", "Período Referência", "Caminho Arquivo"])
-        st.dataframe(df_hist[["Data Geração", "Instituição", "Período Referência"]], use_container_width=True)
+        # Adiciona a coluna de Grupo mapeando os dados
+        df_hist["Grupo"] = df_hist["Instituição"].map(mapa_inst_grupo).fillna("Excluído/Desconhecido")
+
+        st.markdown("#### <i class='fa-solid fa-filter' style='color: #3498DB; margin-right: 8px;'></i> Filtrar Histórico", unsafe_allow_html=True)
+        col_busca, col_filtro = st.columns([2, 1])
+        
+        with col_busca:
+            busca_texto = st.text_input("Pesquisar por nome da Instituição:", placeholder="Ex: UECE Itaperi...")
+        with col_filtro:
+            opcoes_grupos = ["Todos"] + sorted(list(df_hist["Grupo"].unique()))
+            filtro_grupo = st.selectbox("Filtrar por Grupo:", options=opcoes_grupos)
+            
+        # Aplicação dos Filtros no Dataframe
+        if filtro_grupo != "Todos":
+            df_hist = df_hist[df_hist["Grupo"] == filtro_grupo]
+        if busca_texto:
+            df_hist = df_hist[df_hist["Instituição"].str.contains(busca_texto, case=False, na=False)]
+
+        st.dataframe(df_hist[["Data Geração", "Grupo", "Instituição", "Período Referência"]], use_container_width=True, hide_index=True)
         
         st.divider()
-        st.markdown("#### Baixar Relatórios Salvos")
+        st.markdown(f"#### <i class='fa-solid fa-download' style='color: #2ECC71; margin-right: 8px;'></i> Baixar Relatórios ({len(df_hist)} encontrados)", unsafe_allow_html=True)
         
-        for i, row in enumerate(historico[:15]): # Exibe os últimos 15
-            data_geracao, inst, periodo, caminho = row
+        # Iteramos apenas os resultados filtrados (limitado a 15 para não travar a interface visualmente)
+        for index, row in df_hist.head(15).iterrows():
+            data_geracao = row["Data Geração"]
+            inst = row["Instituição"]
+            periodo = row["Período Referência"]
+            caminho = row["Caminho Arquivo"]
+            grupo = row["Grupo"]
             
             if os.path.exists(caminho):
                 with open(caminho, "rb") as pdf_file:
                     st.download_button(
-                        label=f"{inst} ({periodo}) - Gerado em: {data_geracao[:16]}",
+                        label=f"{grupo} | {inst} ({periodo}) - Gerado em: {data_geracao[:16]}",
                         data=pdf_file,
                         file_name=os.path.basename(caminho),
                         mime="application/pdf",
-                        key=f"{caminho}_{i}"
+                        key=f"{caminho}_{index}"
                     )
             else:
                 st.error(f"Arquivo apagado do disco: {inst} ({periodo})")
