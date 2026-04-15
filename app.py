@@ -85,7 +85,6 @@ st.markdown("""
         align-items: center;
         justify-content: space-between;
         width: 100%;
-        margin-top: -10px; 
     }
     
     /* Ícone de Ajuda (i) na Navbar */
@@ -136,7 +135,7 @@ st.markdown("""
         cursor: default;
     }
     .modal-content {
-        background-color: #ffffff; /* Força o branco absoluto no tema light */
+        background-color: var(--background-color);
         padding: 30px 40px;
         border: 1px solid rgba(128,128,128,0.3);
         border-radius: 12px;
@@ -150,7 +149,6 @@ st.markdown("""
         max-height: 90vh;
         overflow-y: auto;
     }
-    
     #modal-toggle:checked ~ .modal-overlay .modal-content {
         transform: scale(1) translateY(0);
     }
@@ -298,22 +296,13 @@ components.html(
                 var brightness = (parseInt(rgba[0]) * 299 + parseInt(rgba[1]) * 587 + parseInt(rgba[2]) * 114) / 1000;
                 var lightLogos = parentDoc.querySelectorAll('.logo-light');
                 var darkLogos = parentDoc.querySelectorAll('.logo-dark');
-                var modalContents = parentDoc.querySelectorAll('.modal-content');
                 
                 if (brightness > 125) { 
                     lightLogos.forEach(el => el.style.display = 'block');
                     darkLogos.forEach(el => el.style.display = 'none');
-                    modalContents.forEach(el => {
-                        el.style.backgroundColor = '#ffffff';
-                        el.style.boxShadow = '0 10px 40px rgba(0,0,0,0.3)';
-                    });
                 } else { 
                     lightLogos.forEach(el => el.style.display = 'none');
                     darkLogos.forEach(el => el.style.display = 'block');
-                    modalContents.forEach(el => {
-                        el.style.backgroundColor = '#0e1117';
-                        el.style.boxShadow = '0 10px 40px rgba(0,0,0,0.8)';
-                    });
                 }
             }
         } catch (e) {}
@@ -380,58 +369,6 @@ def get_items(_zapi, host_id):
 zapi = connect_zabbix()
 
 # ==========================================
-# JANELAS MODAIS (DIALOGS DE CONFIRMAÇÃO)
-# ==========================================
-@st.dialog("⚠️ Confirmar Exclusão do Grupo")
-def dialog_excluir_grupo(grupo_id, grupo_nome):
-    st.warning(f"Você está prestes a excluir o grupo **{grupo_nome}**.")
-    st.write("Esta ação removerá o grupo permanentemente do banco de dados.")
-    
-    col1, col2 = st.columns(2)
-    if col1.button("Sim, excluir grupo", type="primary", use_container_width=True):
-        try:
-            with db.conectar() as conn:
-                cursor = conn.cursor()
-                # Verifica se existem links (instituições) atrelados a este grupo
-                cursor.execute("SELECT count(*) FROM links WHERE grupo_id = ?", (grupo_id,))
-                count = cursor.fetchone()[0]
-                
-                if count > 0:
-                    st.error(f"Não é possível excluir. Existem {count} instituição(ões) vinculadas a este grupo.")
-                else:
-                    cursor.execute("DELETE FROM grupos WHERE id=?", (grupo_id,))
-                    conn.commit()
-                    st.success("Grupo excluído com sucesso!")
-                    time.sleep(1.2)
-                    st.rerun()
-        except Exception as e:
-            st.error(f"Erro ao excluir grupo: {e}")
-            
-    if col2.button("Cancelar", use_container_width=True):
-        st.rerun()
-
-@st.dialog("⚠️ Confirmar Exclusão da Instituição")
-def dialog_excluir_instituicao(inst_id, inst_nome):
-    st.warning(f"Você está prestes a excluir a instituição **{inst_nome}**.")
-    st.write("Esta ação removerá a instituição do monitoramento e não poderá ser desfeita.")
-    
-    col1, col2 = st.columns(2)
-    if col1.button("Sim, excluir instituição", type="primary", use_container_width=True):
-        try:
-            with db.conectar() as conn:
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM links WHERE id=?", (inst_id,))
-                conn.commit()
-            st.success("Instituição excluída com sucesso!")
-            time.sleep(1.2)
-            st.rerun()
-        except Exception as e:
-            st.error("Não foi possível excluir. (Existem relatórios atrelados no histórico)")
-            
-    if col2.button("Cancelar", use_container_width=True):
-        st.rerun()
-
-# ==========================================
 # NAVBAR (CABEÇALHO GLOBAL E MODAL HTML)
 # ==========================================
 def renderizar_navbar():
@@ -448,25 +385,23 @@ def renderizar_navbar():
         with open(caminho_branco, "rb") as f:
             b64_dark = base64.b64encode(f.read()).decode("utf-8")
             
-    # IMPORTANTE: Absolutamente nenhuma linha de HTML dentro dessa string
-    # pode ter 4 ou mais espaços de indentação, senão o Streamlit transforma em bloco de código.
-    html_navbar = f"""
-<div class="custom-navbar">
+    # IMPORTANTE: A string HTML não pode ter espaços/indentações no início, senão o Streamlit transforma em Bloco de Código.
+    html_navbar = f"""<div class="custom-navbar">
 <div style="display: flex; align-items: baseline; gap: 12px;">
-<a href="?page=Home" target="_self" style="text-decoration: none; color: inherit;">
-<span class="nav-title">SAR</span>
-</a>
-<span class="nav-subtitle">SISTEMA DE AUTOMATIZAÇÃO DE RELATÓRIOS</span>
-<label for="modal-toggle" class="info-icon" title="Saiba mais / Ajuda" style="margin-top: 0;">
-<i class="fa-solid fa-circle-info"></i>
-</label>
+    <a href="?page=Home" target="_self" style="text-decoration: none; color: inherit;">
+        <span class="nav-title">SAR</span>
+    </a>
+    <label for="modal-toggle" class="info-icon" title="Saiba mais / Ajuda">
+        <i class="fa-solid fa-circle-info"></i>
+    </label>
+    <span class="nav-subtitle">SISTEMA DE AUTOMATIZAÇÃO DE RELATÓRIOS</span>
 </div>
 
 <div class="logo-wrapper">
-<a href="?page=Home" target="_self" style="text-decoration: none;">
-<img src="data:image/png;base64,{b64_light}" class="nav-logo logo-light" onerror="this.style.display='none'">
-<img src="data:image/png;base64,{b64_dark}" class="nav-logo logo-dark" onerror="this.style.display='none'">
-</a>
+    <a href="?page=Home" target="_self" style="text-decoration: none;">
+        <img src="data:image/png;base64,{b64_light}" class="nav-logo logo-light" onerror="this.style.display='none'">
+        <img src="data:image/png;base64,{b64_dark}" class="nav-logo logo-dark" onerror="this.style.display='none'">
+    </a>
 </div>
 </div>
 
@@ -474,28 +409,27 @@ def renderizar_navbar():
 <div class="modal-overlay">
 <label for="modal-toggle" class="modal-backdrop"></label>
 <div class="modal-content">
-<label for="modal-toggle" class="modal-close">&times;</label>
-<h3 style="margin-top: 0; color: var(--text-color);"><i class='fa-solid fa-circle-info' style='color: #3498DB; margin-right: 10px;'></i> Sobre o Sistema SAR</h3>
-<div class="modal-body">
-<p>O <strong>Sistema de Automatização de Relatórios (SAR)</strong> foi desenvolvido para simplificar e padronizar a extração de métricas de rede do monitoramento do PoP-CE.</p>
-
-<h4><i class="fa-solid fa-layer-group" style="color: #E74C3C; margin-right: 8px;"></i> Como funciona cada aba?</h4>
-<ul>
-<li><strong>Gerar Relatório:</strong> O módulo principal. Permite selecionar uma instituição já cadastrada e definir um intervalo de datas. O sistema consulta a API do Zabbix automaticamente e monta um documento PDF formatado com gráficos limpos, picos de tráfego e resumo de quedas de link (downtime) desse período.</li>
-<li><strong>Gerenciar Instituições:</strong> É o módulo de administração. Aqui você pode criar grupos (como GigaFOR, CDC, etc) e vincular o nome de uma instituição aos seus respectivos <code>Hosts</code> e <code>Interfaces</code> que já estão a ser monitorados lá dentro do Zabbix.</li>
-<li><strong>Histórico:</strong> Mantém um acervo permanente de todos os relatórios em PDF que já foram gerados. Permite buscas e filtragens avançadas para realizar novos downloads instantâneos sem precisar consultar o Zabbix repetidas vezes.</li>
-</ul>
-
-<hr style="border-color: rgba(128,128,128,0.2); margin: 25px 0;">
-
-<h4><i class="fa-solid fa-chart-pie" style="color: #2ECC71; margin-right: 8px;"></i> Entendendo o Relatório e as Interfaces</h4>
-<p>Os relatórios gerados em PDF têm o objetivo de extrair de forma muito clara e visual o panorama de tráfego dos links conectados ao PoP-CE.</p>
-<p><strong>O que as interfaces monitoradas representam?</strong><br>
-Os gráficos desenhados e os cálculos de tráfego baseiam-se na leitura das <strong>interfaces de borda</strong> dos nossos equipamentos. Isto significa que os resultados de <em>Download</em> e <em>Upload</em> apresentados no documento refletem exatamente <strong>o quanto cada instituição está consumindo</strong> do seu link contratado ou disponibilizado, garantindo total transparência do uso efetivo da rede pela visão do PoP-CE.</p>
+    <label for="modal-toggle" class="modal-close">&times;</label>
+    <h3 style="margin-top: 0; color: var(--text-color);"><i class='fa-solid fa-circle-info' style='color: #3498DB; margin-right: 10px;'></i> Sobre o Sistema SAR</h3>
+    <div class="modal-body">
+        <p>O <strong>Sistema de Automatização de Relatórios (SAR)</strong> foi desenvolvido para simplificar e padronizar a extração de métricas de rede do monitoramento do PoP-CE.</p>
+        
+        <h4><i class="fa-solid fa-layer-group" style="color: #E74C3C; margin-right: 8px;"></i> Como funciona cada aba?</h4>
+        <ul>
+            <li><strong>Gerar Relatório:</strong> O módulo principal. Permite selecionar uma instituição já cadastrada e definir um intervalo de datas. O sistema consulta a API do Zabbix automaticamente e monta um documento PDF formatado com gráficos limpos, picos de tráfego e resumo de quedas de link (downtime) desse período.</li>
+            <li><strong>Gerenciar Instituições:</strong> É o módulo de administração. Aqui você pode criar grupos (como GigaFOR, CDC, etc) e vincular o nome de uma instituição aos seus respectivos <code>Hosts</code> e <code>Interfaces</code> que já estão a ser monitorados lá dentro do Zabbix.</li>
+            <li><strong>Histórico:</strong> Mantém um acervo permanente de todos os relatórios em PDF que já foram gerados. Permite buscas e filtragens avançadas para realizar novos downloads instantâneos sem precisar consultar o Zabbix repetidas vezes.</li>
+        </ul>
+        
+        <hr style="border-color: rgba(128,128,128,0.2); margin: 25px 0;">
+        
+        <h4><i class="fa-solid fa-chart-pie" style="color: #2ECC71; margin-right: 8px;"></i> Entendendo o Relatório e as Interfaces</h4>
+        <p>Os relatórios gerados em PDF têm o objetivo de extrair de forma muito clara e visual o panorama de tráfego dos links conectados ao PoP-CE.</p>
+        <p><strong>O que as interfaces monitoradas representam?</strong><br>
+        Os gráficos desenhados e os cálculos de tráfego baseiam-se na leitura das <strong>interfaces de borda</strong> dos nossos equipamentos. Isto significa que os resultados de <em>Download</em> e <em>Upload</em> apresentados no documento refletem exatamente <strong>o quanto cada instituição está consumindo</strong> do seu link contratado ou disponibilizado, garantindo total transparência do uso efetivo da rede pela visão do PoP-CE.</p>
+    </div>
 </div>
-</div>
-</div>
-"""
+</div>"""
     return html_navbar
 
 st.markdown(renderizar_navbar(), unsafe_allow_html=True)
@@ -673,6 +607,13 @@ elif page == "Gerar":
                         mapa_recuperacao = {r['eventid']: int(r['clock']) for r in eventos_recuperacao}
 
                     for e in eventos_problema:
+                        # --- FILTRO DE ALERTAS ---
+                        trigger_name = e['name'].lower()
+                        # Filtra apenas Saturação (bandwidth) e Reinicializações (uptime / restart), ignorando 'link down'
+                        termos_permitidos = ['bandwidth', 'uptime', 'restart']
+                        if not any(termo in trigger_name for termo in termos_permitidos):
+                            continue # Ignora este alerta e passa para o próximo
+
                         inicio = int(e['clock'])
                         r_id = e.get('r_eventid')
                         dur_str = "Ativo/S.Rec."
@@ -731,33 +672,19 @@ elif page == "Cadastros":
     col_grp, col_lnk = st.columns([1, 2])
     
     with col_grp:
-        st.markdown("#### 1. Gerenciar Grupos")
-        tab_novo_grp, tab_excluir_grp = st.tabs(["Novo Grupo", "Excluir Grupo"])
-        
-        with tab_novo_grp:
-            with st.form("form_grupo"):
-                novo_grupo = st.text_input("Nome do Grupo (ex: GigaFOR, CDC)")
-                submit_grupo = st.form_submit_button("Salvar Grupo", type="primary", use_container_width=True)
-                if submit_grupo and novo_grupo:
-                    sucesso, msg = db.adicionar_grupo(novo_grupo)
-                    if sucesso:
-                        st.toast(f"Grupo '{novo_grupo}' criado com sucesso!")
-                        time.sleep(1.2)
-                        st.rerun()
-                    else:
-                        st.error(msg)
-                        
-        with tab_excluir_grp:
-            grupos_disp = db.listar_grupos()
-            if grupos_disp:
-                dict_grupos_excluir = {g[1]: g[0] for g in grupos_disp}
-                grupo_excluir_sel = st.selectbox("Selecione para excluir:", options=list(dict_grupos_excluir.keys()), key="sel_excluir_grupo")
-                
-                if st.button("Excluir Grupo Selecionado", use_container_width=True):
-                    dialog_excluir_grupo(dict_grupos_excluir[grupo_excluir_sel], grupo_excluir_sel)
-            else:
-                st.info("Nenhum grupo cadastrado.")
-                
+        st.markdown("#### 1. Criar Grupo")
+        with st.form("form_grupo"):
+            novo_grupo = st.text_input("Nome do Grupo (ex: GigaFOR, CDC)")
+            submit_grupo = st.form_submit_button("Salvar Grupo")
+            if submit_grupo and novo_grupo:
+                sucesso, msg = db.adicionar_grupo(novo_grupo)
+                if sucesso:
+                    st.toast(f"Grupo '{novo_grupo}' criado com sucesso!")
+                    time.sleep(1.2)
+                    st.rerun()
+                else:
+                    st.error(msg)
+                    
         st.markdown("<h4 style='margin-top: 20px;'><i class='fa-solid fa-folder-tree' style='color: #F39C12; margin-right: 8px;'></i> Grupos Atuais</h4>", unsafe_allow_html=True)
         grupos = db.listar_grupos()
         for g in grupos:
@@ -774,7 +701,7 @@ elif page == "Cadastros":
                     for inst in instituicoes_do_grupo:
                         st.markdown(f"<div style='padding-left: 10px; border-left: 2px solid var(--primary-color); margin-bottom: 6px; color: var(--text-color); opacity: 0.85; font-size: 14px;'>• {inst[0]}</div>", unsafe_allow_html=True)
                 else:
-                    st.markdown("<div style='padding-left: 10px; color: #888; font-style: italic; font-size: 13px;'>Nenhuma instituição cadastrada.</div>", unsafe_allow_html=True)
+                    st.markdown("<div style='padding-left: 10px; color: #888; font-style: italic; font-size: 13px;'>Nenhuma instituição cadastrada neste grupo.</div>", unsafe_allow_html=True)
 
     with col_lnk:
         st.markdown("#### 2. Gerir Instituições")
@@ -787,6 +714,7 @@ elif page == "Cadastros":
             hosts = get_hosts(zapi)
             dict_hosts = {h['name']: h['hostid'] for h in hosts}
 
+            # Nova Navbar de Seleção (Substituindo o antigo st.radio com as bolinhas)
             tab_novo, tab_editar = st.tabs(["Cadastrar Nova Instituição", "Editar Instituição Existente"])
 
             with tab_novo:
@@ -811,7 +739,7 @@ elif page == "Cadastros":
                     
                     cap = st.text_input("Capacidade (ex: 1 Gbps, 500 Mbps)", value="1 Gbps", key="cad_cap")
                     
-                    if st.form_submit_button("Cadastrar Instituição no Banco", type="primary"):
+                    if st.form_submit_button("Cadastrar Instituição no Banco"):
                         if not dict_itens:
                             st.error("Erro: Host sem interfaces.")
                         elif not nome_personalizado.strip():
@@ -861,7 +789,11 @@ elif page == "Cadastros":
                         
                         cap_edit = st.text_input("Capacidade (ex: 1 Gbps, 500 Mbps)", value=curr_cap, key="edit_cap")
                         
-                        submit_edit = st.form_submit_button("Salvar Alterações", type="primary", use_container_width=True)
+                        col_btn1, col_space, col_btn2 = st.columns([2, 5, 2])
+                        with col_btn1:
+                            submit_edit = st.form_submit_button("Salvar Alterações", type="primary", use_container_width=True)
+                        with col_btn2:
+                            submit_delete = st.form_submit_button("Excluir Instituição", use_container_width=True)
                         
                         if submit_edit:
                             if not dict_itens_edit:
@@ -878,12 +810,17 @@ elif page == "Cadastros":
                                 time.sleep(1.2)
                                 st.rerun()
 
-                    # O botão de exclusão da Instituição fica de FORA do formulário
-                    # para que o pop-up (dialog) não seja fechado pelo refresh do botão submit_form
-                    st.markdown("<hr style='margin: 15px 0; opacity: 0.3;'>", unsafe_allow_html=True)
-                    st.markdown("<h5 style='color: #E74C3C;'>Zona de Perigo</h5>", unsafe_allow_html=True)
-                    if st.button("Excluir Instituição", use_container_width=True):
-                        dialog_excluir_instituicao(inst_id_selecionada, curr_nome)
+                            if submit_delete:
+                                try:
+                                    with db.conectar() as conn:
+                                        cursor = conn.cursor()
+                                        cursor.execute("DELETE FROM links WHERE id=?", (inst_id_selecionada,))
+                                        conn.commit()
+                                    st.toast("Instituição excluída com sucesso!")
+                                    time.sleep(1.2)
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error("Não foi possível excluir. (Existem relatórios atrelados no histórico)")
 
 elif page == "Historico":
     # --- PÁGINA: HISTÓRICO ---
