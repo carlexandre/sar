@@ -8,15 +8,22 @@ import base64
 import time
 from pyzabbix import ZabbixAPI
 from dotenv import load_dotenv
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from gerador_relatorio import criar_pdf_completo
 import database as db
+from io import BytesIO
 
 # Garante que a pasta de PDFs exista
 PASTA_PDFS = "pdfs_gerados"
 if not os.path.exists(PASTA_PDFS):
     os.makedirs(PASTA_PDFS)
+
+ZABBIX_URL = os.getenv("ZABBIX_URL")
 
 # Configuração da Página
 st.set_page_config(page_title="SAR | PoP-CE", layout="wide", page_icon="assets/favicon/icons8-relatório-100.png")
@@ -182,7 +189,7 @@ st.markdown("""
 
     /* LOGOS E RESPONSIVIDADE NATIVA */
     .nav-logo {
-        height: 35px; /* Reduzido para ficar do mesmo tamanho do texto SAR */
+        height: 35px;
         width: auto;
         object-fit: contain; 
     }
@@ -343,7 +350,7 @@ def connect_zabbix():
     try:
         zapi = ZabbixAPI(ZABBIX_URL, session=session)
         zapi.login(ZABBIX_USER, ZABBIX_PASSWORD)
-        return zapi
+        return zapi, session
     except Exception as e:
         st.error(f"ERRO FATAL DE CONEXÃO COM O ZABBIX: {e}")
         return None
@@ -366,7 +373,125 @@ def get_items(_zapi, host_id):
         sortfield='name'
     )
 
-zapi = connect_zabbix()
+conn = connect_zabbix()
+if conn:
+    zapi, session = conn
+else:
+    zapi, session = None, None
+
+
+# ==========================================================
+# GERADOR DE GRÁFICO COM MATPLOTLIB
+# ==========================================================
+def gerar_grafico_matplotlib(df_final, nome_inst, capacidade_str, periodo, dt_inicio, dt_fim):
+    """
+    Gera um gráfico de tráfego profissional usando matplotlib.
+    """
+    fig, ax = plt.subplots(figsize=(12, 3.8))
+    fig.patch.set_facecolor('#1a1a2e')
+    ax.set_facecolor('#1e1e3a')
+
+    # Linhas de tráfego
+    ax.plot(df_final['clock'], df_final['recv_mbps'],
+            color='#2ECC71', linewidth=1.2, label='Download (Entrada)', alpha=0.95)
+    ax.plot(df_final['clock'], df_final['sent_mbps'],
+            color='#3498DB', linewidth=1.2, label='Upload (Saída)', alpha=0.95)
+
+    # Preenchimento sob as curvas
+    ax.fill_between(df_final['clock'], df_final['recv_mbps'], alpha=0.12, color='#2ECC71')
+    ax.fill_between(df_final['clock'], df_final['sent_mbps'], alpha=0.12, color='#3498DB')
+
+    # --- AJUSTES DO EIXO X (LIMITES E MARCADORES) ---
+    inicio_ts = pd.to_datetime(int(pd.Timestamp(dt_inicio).timestamp()), unit='s')
+    fim_ts = pd.to_datetime(int(pd.Timestamp(dt_fim).timestamp()) + 86400 - 1, unit='s')
+    
+    # Faz o gráfico grudar e esticar perfeitamente entre as datas iniciais e finais
+    ax.set_xlim(inicio_ts, fim_ts)
+
+    # Gera uma lista de datas dia a dia para mostrar todos os dias
+    dias_total = (fim_ts - inicio_ts).days
+    freq_dias = '1D' if dias_total <= 60 else f'{max(1, dias_total // 30)}D'
+    
+    ticks_datas = pd.date_range(start=inicio_ts.normalize(), end=fim_ts.normalize(), freq=freq_dias).tolist()
+    
+    ultimo_dia = fim_ts.normalize()
+    if ultimo_dia not in ticks_datas:
+        ticks_datas.append(ultimo_dia)
+            
+    ax.set_xticks(ticks_datas)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%d/%m'))
+    
+    # Aplica a rotação vertical de 90 graus
+    plt.xticks(rotation=90)
+
+    # Personalização inteligente: a cada 5 dias fica maior, o resto do intervalo fica menor
+    for i, label in enumerate(ax.xaxis.get_ticklabels()):
+        if i % 5 == 0 or i == len(ticks_datas) - 1:
+            label.set_fontsize(9)
+            label.set_color('#ffffff') # Cor forte/clara
+            label.set_fontweight('bold')
+        else:
+            label.set_fontsize(6)
+            label.set_color('#777777') # Cor fraca/discreta nos intervalos
+            label.set_fontweight('normal')
+    
+    # --- AJUSTES DINÂMICOS DO EIXO Y ---
+    max_trafego = max(df_final['recv_mbps'].max(), df_final['sent_mbps'].max()) if not df_final.empty else 0
+    
+    # Lógica progressiva em etapas de 100 até 1000
+    if max_trafego <= 100:
+        y_max = 100
+    elif max_trafego <= 200:
+        y_max = 200
+    elif max_trafego <= 300:
+        y_max = 300
+    elif max_trafego <= 400:
+        y_max = 400
+    elif max_trafego <= 500:
+        y_max = 500
+    elif max_trafego <= 600:
+        y_max = 600
+    elif max_trafego <= 700:
+        y_max = 700
+    elif max_trafego <= 800:
+        y_max = 800
+    elif max_trafego <= 900:
+        y_max = 900
+    elif max_trafego <= 1000:
+        y_max = 1000
+    else:
+        # Passou de 1000 Mbps, volta à regra de 5% de margem no teto para não cortar o pico
+        y_max = max_trafego * 1.05
+        
+    ax.set_ylim(0, y_max)
+    plt.yticks(color='#cccccc', fontsize=8)
+
+    ax.set_xlabel('Data', color='#aaaaaa', fontsize=9)
+    ax.set_ylabel('Tráfego (Mbps)', color='#aaaaaa', fontsize=9)
+    
+    titulo = f'Tráfego de Rede - {nome_inst}'
+    subtitulo = f'{periodo}  |  Capacidade: {capacidade_str}'
+    ax.set_title(f'{titulo}\n{subtitulo}', color='white', fontsize=10,
+                 fontweight='bold', pad=10)
+
+    ax.legend(loc='upper right', fontsize=8,
+              facecolor='#2c2c54', edgecolor='#555', labelcolor='white')
+
+    ax.tick_params(colors='#cccccc', which='both')
+    for spine in ax.spines.values():
+        spine.set_edgecolor('#444')
+    ax.grid(axis='y', color='#333', linewidth=0.6, linestyle='--', alpha=0.7)
+    ax.grid(axis='x', color='#333', linewidth=0.3, linestyle=':', alpha=0.5)
+
+    plt.tight_layout(pad=1.5)
+
+    buf = BytesIO()
+    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight',
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
 
 # ==========================================
 # NAVBAR (CABEÇALHO GLOBAL E MODAL HTML)
@@ -384,50 +509,43 @@ def renderizar_navbar():
     if os.path.exists(caminho_branco):
         with open(caminho_branco, "rb") as f:
             b64_dark = base64.b64encode(f.read()).decode("utf-8")
-            
-    # IMPORTANTE: A string HTML não pode ter espaços/indentações no início, senão o Streamlit transforma em Bloco de Código.
+
     html_navbar = f"""<div class="custom-navbar">
 <div style="display: flex; align-items: baseline; gap: 12px;">
-    <a href="?page=Home" target="_self" style="text-decoration: none; color: inherit;">
-        <span class="nav-title">SAR</span>
-    </a>
-    <label for="modal-toggle" class="info-icon" title="Saiba mais / Ajuda">
-        <i class="fa-solid fa-circle-info"></i>
-    </label>
-    <span class="nav-subtitle">SISTEMA DE AUTOMATIZAÇÃO DE RELATÓRIOS</span>
+<a href="?page=Home" target="_self" style="text-decoration: none; color: inherit;">
+<span class="nav-title">SAR</span>
+</a>
+<label for="modal-toggle" class="info-icon" title="Saiba mais / Ajuda">
+<i class="fa-solid fa-circle-info"></i>
+</label>
+<span class="nav-subtitle">SISTEMA DE AUTOMATIZAÇÃO DE RELATÓRIOS</span>
 </div>
-
 <div class="logo-wrapper">
-    <a href="?page=Home" target="_self" style="text-decoration: none;">
-        <img src="data:image/png;base64,{b64_light}" class="nav-logo logo-light" onerror="this.style.display='none'">
-        <img src="data:image/png;base64,{b64_dark}" class="nav-logo logo-dark" onerror="this.style.display='none'">
-    </a>
+<a href="?page=Home" target="_self" style="text-decoration: none;">
+<img src="data:image/png;base64,{b64_light}" class="nav-logo logo-light" onerror="this.style.display='none'">
+<img src="data:image/png;base64,{b64_dark}" class="nav-logo logo-dark" onerror="this.style.display='none'">
+</a>
 </div>
 </div>
-
 <input type="checkbox" id="modal-toggle" style="display: none;">
 <div class="modal-overlay">
 <label for="modal-toggle" class="modal-backdrop"></label>
 <div class="modal-content">
-    <label for="modal-toggle" class="modal-close">&times;</label>
-    <h3 style="margin-top: 0; color: var(--text-color);"><i class='fa-solid fa-circle-info' style='color: #3498DB; margin-right: 10px;'></i> Sobre o Sistema SAR</h3>
-    <div class="modal-body">
-        <p>O <strong>Sistema de Automatização de Relatórios (SAR)</strong> foi desenvolvido para simplificar e padronizar a extração de métricas de rede do monitoramento do PoP-CE.</p>
-        
-        <h4><i class="fa-solid fa-layer-group" style="color: #E74C3C; margin-right: 8px;"></i> Como funciona cada aba?</h4>
-        <ul>
-            <li><strong>Gerar Relatório:</strong> O módulo principal. Permite selecionar uma instituição já cadastrada e definir um intervalo de datas. O sistema consulta a API do Zabbix automaticamente e monta um documento PDF formatado com gráficos limpos, picos de tráfego e resumo de quedas de link (downtime) desse período.</li>
-            <li><strong>Gerenciar Instituições:</strong> É o módulo de administração. Aqui você pode criar grupos (como GigaFOR, CDC, etc) e vincular o nome de uma instituição aos seus respectivos <code>Hosts</code> e <code>Interfaces</code> que já estão a ser monitorados lá dentro do Zabbix.</li>
-            <li><strong>Histórico:</strong> Mantém um acervo permanente de todos os relatórios em PDF que já foram gerados. Permite buscas e filtragens avançadas para realizar novos downloads instantâneos sem precisar consultar o Zabbix repetidas vezes.</li>
-        </ul>
-        
-        <hr style="border-color: rgba(128,128,128,0.2); margin: 25px 0;">
-        
-        <h4><i class="fa-solid fa-chart-pie" style="color: #2ECC71; margin-right: 8px;"></i> Entendendo o Relatório e as Interfaces</h4>
-        <p>Os relatórios gerados em PDF têm o objetivo de extrair de forma muito clara e visual o panorama de tráfego dos links conectados ao PoP-CE.</p>
-        <p><strong>O que as interfaces monitoradas representam?</strong><br>
-        Os gráficos desenhados e os cálculos de tráfego baseiam-se na leitura das <strong>interfaces de borda</strong> dos nossos equipamentos. Isto significa que os resultados de <em>Download</em> e <em>Upload</em> apresentados no documento refletem exatamente <strong>o quanto cada instituição está consumindo</strong> do seu link contratado ou disponibilizado, garantindo total transparência do uso efetivo da rede pela visão do PoP-CE.</p>
-    </div>
+<label for="modal-toggle" class="modal-close">&times;</label>
+<h3 style="margin-top: 0; color: var(--text-color);"><i class="fa-solid fa-circle-info" style="color: #3498DB; margin-right: 10px;"></i> Sobre o Sistema SAR</h3>
+<div class="modal-body">
+<p>O <strong>Sistema de Automatização de Relatórios (SAR)</strong> foi desenvolvido para simplificar e padronizar a extração de métricas de rede do monitoramento do PoP-CE.</p>
+<h4><i class="fa-solid fa-layer-group" style="color: #E74C3C; margin-right: 8px;"></i> Como funciona cada aba?</h4>
+<ul>
+<li><strong>Gerar Relatório:</strong> O módulo principal. Permite selecionar uma instituição já cadastrada e definir um intervalo de datas. O sistema consulta a API do Zabbix automaticamente e monta um documento PDF formatado com gráficos limpos, picos de tráfego e resumo de quedas de link (downtime) desse período.</li>
+<li><strong>Gerenciar Instituições:</strong> É o módulo de administração. Aqui você pode criar grupos (como GigaFOR, CDC, etc) e vincular o nome de uma instituição aos seus respectivos <code>Hosts</code> e <code>Interfaces</code> que já estão a ser monitorados lá dentro do Zabbix.</li>
+<li><strong>Histórico:</strong> Mantém um acervo permanente de todos os relatórios em PDF que já foram gerados. Permite buscas e filtragens avançadas para realizar novos downloads instantâneos sem precisar consultar o Zabbix repetidas vezes.</li>
+</ul>
+<hr style="border-color: rgba(128,128,128,0.2); margin: 25px 0;">
+<h4><i class="fa-solid fa-chart-pie" style="color: #2ECC71; margin-right: 8px;"></i> Entendendo o Relatório e as Interfaces</h4>
+<p>Os relatórios gerados em PDF têm o objetivo de extrair de forma muito clara e visual o panorama de tráfego dos links conectados ao PoP-CE.</p>
+<p><strong>O que as interfaces monitoradas representam?</strong><br>Os gráficos desenhados e os cálculos de tráfego baseiam-se na leitura das <strong>interfaces de borda</strong> dos nossos equipamentos. Isto significa que os resultados de <em>Download</em> e <em>Upload</em> apresentados no documento refletem exatamente <strong>o quanto cada instituição está consumindo</strong> do seu link contratado ou disponibilizado, garantindo total transparência do uso efetivo da rede pela visão do PoP-CE.</p>
+</div>
 </div>
 </div>"""
     return html_navbar
@@ -447,33 +565,33 @@ if page == "Home":
     with c1:
         st.markdown("""
         <a href="?page=Gerar" target="_self" class="card-link">
-            <div class="card-container">
-                <i class='fa-solid fa-file-pdf card-icon pdf'></i>
-                <div class='card-title'>Gerar Relatório</div>
-                <p class='card-desc'>Consulte o tráfego do Zabbix e exporte o documento PDF formatado.</p>
-            </div>
+        <div class="card-container">
+        <i class="fa-solid fa-file-pdf card-icon pdf"></i>
+        <div class="card-title">Gerar Relatório</div>
+        <p class="card-desc">Consulte o tráfego do Zabbix e exporte o documento PDF formatado.</p>
+        </div>
         </a>
         """, unsafe_allow_html=True)
 
     with c2:
         st.markdown("""
         <a href="?page=Cadastros" target="_self" class="card-link">
-            <div class="card-container">
-                <i class='fa-solid fa-network-wired card-icon net'></i>
-                <div class='card-title'>Gerenciar Instituições</div>
-                <p class='card-desc'>Gerencie as instituições, grupos e interfaces de monitoramento.</p>
-            </div>
+        <div class="card-container">
+        <i class="fa-solid fa-network-wired card-icon net"></i>
+        <div class="card-title">Gerenciar Instituições</div>
+        <p class="card-desc">Gerencie as instituições, grupos e interfaces de monitoramento.</p>
+        </div>
         </a>
         """, unsafe_allow_html=True)
 
     with c3:
         st.markdown("""
         <a href="?page=Historico" target="_self" class="card-link">
-            <div class="card-container">
-                <i class='fa-solid fa-folder-open card-icon hist'></i>
-                <div class='card-title'>Histórico</div>
-                <p class='card-desc'>Acesse o repositório de relatórios gerados anteriormente pelo sistema.</p>
-            </div>
+        <div class="card-container">
+        <i class="fa-solid fa-folder-open card-icon hist"></i>
+        <div class="card-title">Histórico</div>
+        <p class="card-desc">Acesse o repositório de relatórios gerados anteriormente pelo sistema.</p>
+        </div>
         </a>
         """, unsafe_allow_html=True)
 
@@ -484,7 +602,6 @@ elif page == "Gerar":
     with col_btn:
         st.markdown('<div style="text-align: right; margin-top: 5px;"><a href="?page=Home" target="_self" class="btn-voltar"><i class="fa-solid fa-arrow-left"></i> Voltar</a></div>', unsafe_allow_html=True)
     
-    # Realiza a consulta SQL trazendo as instituições com o nome do grupo associado
     with db.conectar() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -499,7 +616,6 @@ elif page == "Gerar":
     elif not zapi:
         st.error("Sem conexão com o Zabbix. Verifique suas credenciais no .env.")
     else:
-        # Coloca num DataFrame para facilitar os filtros e formata os sem grupo
         df_links = pd.DataFrame(links_raw, columns=["id", "nome", "grupo"])
         df_links["grupo"] = df_links["grupo"].fillna("Sem Grupo")
         
@@ -512,7 +628,6 @@ elif page == "Gerar":
             opcoes_grupos = ["Todos"] + sorted(list(df_links["grupo"].unique()))
             filtro_grupo = st.selectbox("Filtrar por Grupo:", options=opcoes_grupos)
             
-        # Aplicação dos Filtros no Dataframe de Instituições
         if filtro_grupo != "Todos":
             df_links = df_links[df_links["grupo"] == filtro_grupo]
         if busca_inst:
@@ -525,18 +640,18 @@ elif page == "Gerar":
         with col_link:
             if df_links.empty:
                 st.warning("Nenhuma instituição encontrada com os filtros atuais.")
-                inst_id_selecionada = None
+                inst_ids_selecionadas = []
             else:
-                # O Dicionário de opções com o formato "Grupo - Nome"
                 opcoes_inst = {f"{row['grupo']} - {row['nome']}": row['id'] for _, row in df_links.iterrows()}
-                # Caixa de Seleção com index=None deixa-a "vazia" inicialmente com a string placeholder
-                inst_selecionada_nome = st.selectbox(
-                    "Selecione a Instituição:", 
+                
+                # Multiselect para suportar até 3 instituições
+                insts_selecionadas_nomes = st.multiselect(
+                    "Selecione até 3 Instituições:", 
                     options=list(opcoes_inst.keys()),
-                    index=None,
-                    placeholder="Instituições"
+                    max_selections=3,
+                    placeholder="Selecione as instituições..."
                 )
-                inst_id_selecionada = opcoes_inst.get(inst_selecionada_nome) if inst_selecionada_nome else None
+                inst_ids_selecionadas = [opcoes_inst[nome] for nome in insts_selecionadas_nomes]
             
         with col_data:
             dt_inicio = st.date_input("Data Início", value=date.today() - timedelta(days=30))
@@ -544,133 +659,191 @@ elif page == "Gerar":
             
         st.divider()
         
-        # Botão fica desativado (cinza) até que o utilizador selecione ativamente uma Instituição na caixa
-        if st.button("Gerar Relatório e Salvar", type="primary", disabled=(not inst_id_selecionada)):
-            with st.spinner("Conectando ao Zabbix, processando dados e desenhando o PDF..."):
+        if st.button("Gerar Relatório e Salvar", type="primary", disabled=(not inst_ids_selecionadas)):
+            with st.spinner("Consultando Zabbix, processando gráficos e montando o PDF..."):
                 try:
-                    with db.conectar() as conn:
-                        cursor = conn.cursor()
-                        cursor.execute("SELECT nome_instituicao, host_id, item_down_id, item_up_id, capacidade_str FROM links WHERE id = ?", (inst_id_selecionada,))
-                        dados_link = cursor.fetchone()
+                    lista_dados_relatorio = []
+                    nomes_arquivos = []
+                    periodo_str = f"{dt_inicio.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}"
                     
-                    nome_inst, host_id, item_down, item_up, cap_str = dados_link
                     ts_from = int(pd.Timestamp(dt_inicio).timestamp())
-                    ts_till = int(pd.Timestamp(dt_fim).timestamp()) + 86400 
+                    ts_till = int(pd.Timestamp(dt_fim).timestamp()) + 86400
 
                     def buscar_dados(api, item_id, t_from, t_till):
                         dados = api.history.get(itemids=[item_id], time_from=t_from, time_till=t_till, output='extend', history=3)
                         eh_tendencia = False
+                        
+                        precisa_trend = False
                         if not dados:
+                            precisa_trend = True
+                        else:
+                            primeiro_registro = min(int(d['clock']) for d in dados)
+                            if (primeiro_registro - t_from) > 86400:
+                                precisa_trend = True
+
+                        if precisa_trend:
                             dados = api.trend.get(itemids=[item_id], time_from=t_from, time_till=t_till, output=['clock', 'value_avg', 'value_max'])
                             eh_tendencia = True
+                            
                         return dados, eh_tendencia
 
-                    raw_in, is_trend_in = buscar_dados(zapi, item_down, ts_from, ts_till)
-                    raw_out, is_trend_out = buscar_dados(zapi, item_up, ts_from, ts_till)
+                    # Loop para buscar e gerar os itens de CADA instituição selecionada
+                    for inst_id in inst_ids_selecionadas:
+                        with db.conectar() as conn:
+                            cursor = conn.cursor()
+                            cursor.execute("SELECT nome_instituicao, host_id, item_down_id, item_up_id, capacidade_str FROM links WHERE id = ?", (inst_id,))
+                            dados_link = cursor.fetchone()
+                        
+                        nome_inst, host_id, item_down, item_up, cap_str = dados_link
+                        nomes_arquivos.append(nome_inst)
+                        
+                        raw_in, is_trend_in = buscar_dados(zapi, item_down, ts_from, ts_till)
+                        raw_out, is_trend_out = buscar_dados(zapi, item_up, ts_from, ts_till)
 
-                    if not raw_in or not raw_out:
-                        st.error("Dados de tráfego não encontrados para este período.")
+                        if not raw_in or not raw_out:
+                            st.warning(f"Dados de tráfego não encontrados para {nome_inst} neste período. Ignorando...")
+                            continue
+
+                        def calc_stats(dados_raw, is_trend):
+                            df = pd.DataFrame(dados_raw)
+                            if is_trend:
+                                return pd.to_numeric(df['value_max']).max(), pd.to_numeric(df['value_avg']).mean()
+                            df['value'] = pd.to_numeric(df['value'])
+                            return df['value'].max(), df['value'].mean()
+
+                        pico_in, media_in = calc_stats(raw_in, is_trend_in)
+                        pico_out, media_out = calc_stats(raw_out, is_trend_out)
+
+                        estatisticas_reais = {
+                            'media_in': media_in / 1_000_000, 'max_in': pico_in / 1_000_000,
+                            'media_out': media_out / 1_000_000, 'max_out': pico_out / 1_000_000
+                        }
+
+                        def prep_df(dados, is_trend):
+                            df = pd.DataFrame(dados)
+                            df['clock'] = pd.to_datetime(pd.to_numeric(df['clock']), unit='s')
+                            df['value'] = pd.to_numeric(df['value_max']) if is_trend else pd.to_numeric(df['value'])
+                            return df[['clock', 'value']]
+
+                        df_final = pd.merge(
+                            prep_df(raw_in, is_trend_in),
+                            prep_df(raw_out, is_trend_out),
+                            on='clock', how='outer',
+                            suffixes=('_in', '_out')
+                        ).sort_values('clock').fillna(0)
+                        df_final['recv_mbps'] = df_final['value_in'] / 1_000_000
+                        df_final['sent_mbps'] = df_final['value_out'] / 1_000_000
+
+                        infos = {
+                            'instituicao': nome_inst,
+                            'interface': "Interface de Borda (Banco de Dados)",
+                            'periodo': periodo_str,
+                            'capacidade': cap_str 
+                        }
+
+                        grafico_bytes = gerar_grafico_matplotlib(
+                            df_final=df_final,
+                            nome_inst=nome_inst,
+                            capacidade_str=cap_str,
+                            periodo=infos['periodo'],
+                            dt_inicio=dt_inicio,
+                            dt_fim=dt_fim
+                        )
+
+                        alertas_reais = []
+                        eventos_problema = zapi.event.get(hostids=[host_id], time_from=ts_from, time_till=ts_till, output=['eventid', 'name', 'clock', 'r_eventid'], value=1, sortfield='clock')
+                        r_event_ids = [e['r_eventid'] for e in eventos_problema if e.get('r_eventid') and e.get('r_eventid') != '0']
+                        
+                        mapa_recuperacao = {}
+                        if r_event_ids:
+                            eventos_recuperacao = zapi.event.get(eventids=r_event_ids, output=['eventid', 'clock'])
+                            mapa_recuperacao = {r['eventid']: int(r['clock']) for r in eventos_recuperacao}
+
+                        for e in eventos_problema:
+                            trigger_name = e['name'].lower()
+                            termos_permitidos = ['bandwidth', 'uptime', 'restart']
+                            if not any(termo in trigger_name for termo in termos_permitidos):
+                                continue
+
+                            inicio = int(e['clock'])
+                            r_id = e.get('r_eventid')
+                            dur_str = "Ativo/S.Rec."
+                            if r_id and r_id in mapa_recuperacao:
+                                duracao_segundos = mapa_recuperacao[r_id] - inicio
+                                dias, resto = divmod(duracao_segundos, 86400)
+                                horas, resto = divmod(resto, 3600)
+                                minutos, segundos = divmod(resto, 60)
+                                partes = []
+                                if dias > 0: partes.append(f"{dias}d")
+                                if horas > 0: partes.append(f"{horas}h")
+                                if minutos > 0: partes.append(f"{minutos}m")
+                                if not partes: partes.append(f"{segundos}s")
+                                dur_str = " ".join(partes)
+                            
+                            alertas_reais.append({
+                                'data': pd.to_datetime(inicio, unit='s').tz_localize('UTC').tz_convert('America/Fortaleza').strftime('%d/%m %H:%M'),
+                                'trigger': e['name'], 'duracao': dur_str, 'host': nome_inst
+                            })
+
+                        # Adiciona os dados na lista para mandar para o gerador de PDF multi-institucional
+                        lista_dados_relatorio.append({
+                            'grafico_bytes': grafico_bytes,
+                            'infos': infos,
+                            'alertas': alertas_reais,
+                            'stats': estatisticas_reais
+                        })
+                    
+                    if not lista_dados_relatorio:
+                        st.error("Nenhuma das instituições possui dados no Zabbix para este período.")
                         st.stop()
 
-                    def calc_stats(dados_raw, is_trend):
-                        df = pd.DataFrame(dados_raw)
-                        df['value'] = pd.to_numeric(df['value']) if not is_trend else pd.to_numeric(df['value_avg'])
-                        if is_trend:
-                            return pd.to_numeric(df['value_max']).max(), pd.to_numeric(df['value_avg']).mean()
-                        return df['value'].max(), df['value'].mean()
-
-                    pico_in, media_in = calc_stats(raw_in, is_trend_in)
-                    pico_out, media_out = calc_stats(raw_out, is_trend_out)
-
-                    estatisticas_reais = {
-                        'media_in': media_in / 1_000_000, 'max_in': pico_in / 1_000_000,
-                        'media_out': media_out / 1_000_000, 'max_out': pico_out / 1_000_000
-                    }
-
-                    def prep_df(dados, is_trend):
-                        df = pd.DataFrame(dados)
-                        df['clock'] = pd.to_datetime(pd.to_numeric(df['clock']), unit='s')
-                        df['value'] = pd.to_numeric(df['value_avg']) if is_trend else pd.to_numeric(df['value'])
-                        return df[['clock', 'value']]
-
-                    df_final = pd.merge(prep_df(raw_in, is_trend_in), prep_df(raw_out, is_trend_out), on='clock', how='outer', suffixes=('_in', '_out')).sort_values('clock').fillna(0)
-                    df_final['recv_mbps'] = df_final['value_in'] / 1_000_000
-                    df_final['sent_mbps'] = df_final['value_out'] / 1_000_000
-
-                    alertas_reais = []
-                    eventos_problema = zapi.event.get(hostids=[host_id], time_from=ts_from, time_till=ts_till, output=['eventid', 'name', 'clock', 'r_eventid'], value=1, sortfield='clock')
-                    r_event_ids = [e['r_eventid'] for e in eventos_problema if e.get('r_eventid') and e.get('r_eventid') != '0']
+                    # Chama a função do PDF (agora passando a lista inteira)
+                    pdf_bytes = criar_pdf_completo(
+                        lista_dados=lista_dados_relatorio,
+                        dt_inicio=dt_inicio,
+                        dt_fim=dt_fim
+                    )
                     
-                    mapa_recuperacao = {}
-                    if r_event_ids:
-                        eventos_recuperacao = zapi.event.get(eventids=r_event_ids, output=['eventid', 'clock'])
-                        mapa_recuperacao = {r['eventid']: int(r['clock']) for r in eventos_recuperacao}
-
-                    for e in eventos_problema:
-                        # --- FILTRO DE ALERTAS ---
-                        trigger_name = e['name'].lower()
-                        # Filtra apenas Saturação (bandwidth) e Reinicializações (uptime / restart), ignorando 'link down'
-                        termos_permitidos = ['bandwidth', 'uptime', 'restart']
-                        if not any(termo in trigger_name for termo in termos_permitidos):
-                            continue # Ignora este alerta e passa para o próximo
-
-                        inicio = int(e['clock'])
-                        r_id = e.get('r_eventid')
-                        dur_str = "Ativo/S.Rec."
-                        if r_id and r_id in mapa_recuperacao:
-                            duracao_segundos = mapa_recuperacao[r_id] - inicio
-                            dias, resto = divmod(duracao_segundos, 86400)
-                            horas, resto = divmod(resto, 3600)
-                            minutos, segundos = divmod(resto, 60)
-                            partes = []
-                            if dias > 0: partes.append(f"{dias}d")
-                            if horas > 0: partes.append(f"{horas}h")
-                            if minutos > 0: partes.append(f"{minutos}m")
-                            if not partes: partes.append(f"{segundos}s")
-                            dur_str = " ".join(partes)
-                        
-                        alertas_reais.append({
-                            'data': pd.to_datetime(inicio, unit='s').tz_localize('UTC').tz_convert('America/Fortaleza').strftime('%d/%m %H:%M'),
-                            'trigger': e['name'], 'duracao': dur_str, 'host': nome_inst
-                        })
-
-                    infos = {
-                        'instituicao': nome_inst,
-                        'interface': "Interface de Borda (Banco de Dados)",
-                        'periodo': f"{dt_inicio.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}",
-                        'capacidade': cap_str 
-                    }
-                    
-                    pdf_bytes = criar_pdf_completo(df_final, infos, alertas_reais, estatisticas_reais)
-                    
-                    nome_arquivo = f"Relatorio_{nome_inst.replace(' ', '_')}_{dt_inicio.strftime('%Y%m%d')}.pdf"
+                    prefixo = "Relatorio_Conjunto" if len(nomes_arquivos) > 1 else f"Relatorio_{nomes_arquivos[0].replace(' ', '_')}"
+                    nome_arquivo = f"{prefixo}_{dt_inicio.strftime('%Y%m%d')}.pdf"
                     caminho_completo = os.path.join(PASTA_PDFS, nome_arquivo)
+                    
                     with open(caminho_completo, "wb") as f:
-                        f.write(pdf_bytes)
+                        f.write(pdf_bytes if isinstance(pdf_bytes, bytes) else pdf_bytes.encode('latin-1'))
                         
-                    db.registrar_relatorio(inst_id_selecionada, infos['periodo'], caminho_completo)
+                    for inst_id in inst_ids_selecionadas:
+                        db.registrar_relatorio(inst_id, periodo_str, caminho_completo)
 
                     st.toast("Relatório gerado e salvo no histórico com sucesso!")
                     st.download_button(
                         label="Baixar PDF Agora",
-                        data=bytes(pdf_bytes),
+                        data=pdf_bytes if isinstance(pdf_bytes, bytes) else pdf_bytes.encode('latin-1'),
                         file_name=nome_arquivo,
                         mime="application/pdf"
                     )
 
                 except Exception as e:
                     st.error(f"Erro Crítico: {e}")
+                    import traceback
+                    st.exception(e)
 
 elif page == "Cadastros":
-    # --- PÁGINA: GERENCIAR INSTITUIÇÕES ---
     col_tit, col_btn = st.columns([8, 2])
     with col_tit:
         st.markdown("<h3 style='margin-bottom: 20px;'><i class='fa-solid fa-network-wired' style='color: #3498DB; margin-right: 10px;'></i> Gestão de Grupos e Instituições</h3>", unsafe_allow_html=True)
     with col_btn:
         st.markdown('<div style="text-align: right; margin-top: 5px;"><a href="?page=Home" target="_self" class="btn-voltar"><i class="fa-solid fa-arrow-left"></i> Voltar</a></div>', unsafe_allow_html=True)
     
+    if not zapi:
+        st.error("Sem conexão com o Zabbix. Verifique suas credenciais no .env.")
+        st.stop()
+
     col_grp, col_lnk = st.columns([1, 2])
     
+    hosts_brutos = get_hosts(zapi)
+    dict_hosts = {limpar_nome_host(h['name']): h['hostid'] for h in hosts_brutos}
+    dict_grupos = {g[1]: g[0] for g in db.listar_grupos()}
+
     with col_grp:
         st.markdown("#### 1. Criar Grupo")
         with st.form("form_grupo"):
@@ -687,61 +860,51 @@ elif page == "Cadastros":
                     
         st.markdown("<h4 style='margin-top: 20px;'><i class='fa-solid fa-folder-tree' style='color: #F39C12; margin-right: 8px;'></i> Grupos Atuais</h4>", unsafe_allow_html=True)
         grupos = db.listar_grupos()
-        for g in grupos:
-            grupo_id, grupo_nome = g[0], g[1]
-            # Expander permite clicar e abrir para ver o conteúdo
-            with st.expander(f"📂 {grupo_nome}"):
-                # Consulta SQL embutida para buscar as instituições deste grupo específico
-                with db.conectar() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT nome_instituicao FROM links WHERE grupo_id = ?", (grupo_id,))
-                    instituicoes_do_grupo = cursor.fetchall()
-                
-                if instituicoes_do_grupo:
-                    for inst in instituicoes_do_grupo:
-                        st.markdown(f"<div style='padding-left: 10px; border-left: 2px solid var(--primary-color); margin-bottom: 6px; color: var(--text-color); opacity: 0.85; font-size: 14px;'>• {inst[0]}</div>", unsafe_allow_html=True)
-                else:
-                    st.markdown("<div style='padding-left: 10px; color: #888; font-style: italic; font-size: 13px;'>Nenhuma instituição cadastrada neste grupo.</div>", unsafe_allow_html=True)
+        if not grupos:
+            st.info("Nenhum grupo criado ainda.")
+        else:
+            for g_id, g_nome in grupos:
+                links_do_grupo = db.listar_links(grupo_id=g_id)
+                with st.expander(f"{g_nome} ({len(links_do_grupo)} instituições)"):
+                    if links_do_grupo:
+                        for lnk in links_do_grupo:
+                            st.markdown(f"- {lnk[1]} `{lnk[5]}`")
+                    else:
+                        st.caption("Nenhuma instituição neste grupo.")
 
     with col_lnk:
-        st.markdown("#### 2. Gerir Instituições")
-        if not grupos:
-            st.warning("Crie um grupo primeiro para prosseguir.")
-        elif not zapi:
-            st.error("Conecte ao Zabbix primeiro para listar as interfaces.")
-        else:
-            dict_grupos = {g[1]: g[0] for g in grupos}
-            hosts = get_hosts(zapi)
-            dict_hosts = {h['name']: h['hostid'] for h in hosts}
+        st.markdown("#### 2. Vincular Instituição")
+        tab_adicionar, tab_editar = st.tabs(["Adicionar Nova", "Editar / Excluir"])
 
-            # Nova Navbar de Seleção (Substituindo o antigo st.radio com as bolinhas)
-            tab_novo, tab_editar = st.tabs(["Cadastrar Nova Instituição", "Editar Instituição Existente"])
-
-            with tab_novo:
-                grupo_sel = st.selectbox("Selecione o Grupo:", options=list(dict_grupos.keys()), key="cad_grupo")
-                host_sel = st.selectbox("Selecione o Host no Zabbix:", options=list(dict_hosts.keys()), key="cad_host")
+        with tab_adicionar:
+            if not dict_grupos:
+                st.warning("Crie um grupo primeiro (coluna à esquerda).")
+            elif not dict_hosts:
+                st.warning("Nenhum host encontrado no Zabbix.")
+            else:
+                grupo_sel = st.selectbox("Grupo:", options=list(dict_grupos.keys()), key="add_grupo")
+                host_sel = st.selectbox("Host no Zabbix:", options=list(dict_hosts.keys()), key="add_host")
                 
                 host_id_real = dict_hosts[host_sel]
                 itens_brutos = get_items(zapi, host_id_real)
                 dict_itens = {i['name']: i['itemid'] for i in itens_brutos}
                 
-                nome_sugerido = limpar_nome_host(host_sel)
-                
-                with st.form("form_link_novo"):
-                    nome_personalizado = st.text_input("Nome da Instituição (para o relatório):", value=nome_sugerido, key="cad_nome")
+                with st.form("form_link_adicionar"):
+                    nome_personalizado = st.text_input("Nome da Instituição (para o relatório):", placeholder="Ex: UECE Campus Itaperi")
                     
                     if not dict_itens:
                         st.warning("Nenhuma interface encontrada neste host.")
                         item_down_sel, item_up_sel = None, None
                     else:
-                        item_down_sel = st.selectbox("Interface de DOWNLOAD (Entrada):", options=list(dict_itens.keys()), key="cad_down")
-                        item_up_sel = st.selectbox("Interface de UPLOAD (Saída):", options=list(dict_itens.keys()), key="cad_up")
+                        item_down_sel = st.selectbox("Interface de DOWNLOAD (Entrada):", options=list(dict_itens.keys()), key="add_down")
+                        item_up_sel = st.selectbox("Interface de UPLOAD (Saída):", options=list(dict_itens.keys()), key="add_up")
                     
-                    cap = st.text_input("Capacidade (ex: 1 Gbps, 500 Mbps)", value="1 Gbps", key="cad_cap")
+                    cap = st.text_input("Capacidade (ex: 1 Gbps, 500 Mbps)", placeholder="1 Gbps")
+                    submit_link = st.form_submit_button("Salvar Instituição", type="primary", use_container_width=True)
                     
-                    if st.form_submit_button("Cadastrar Instituição no Banco"):
+                    if submit_link:
                         if not dict_itens:
-                            st.error("Erro: Host sem interfaces.")
+                            st.error("Erro: Host sem interfaces válidas.")
                         elif not nome_personalizado.strip():
                             st.error("Erro: Nome em branco.")
                         else:
@@ -749,81 +912,80 @@ elif page == "Cadastros":
                             st.toast(f"Instituição '{nome_personalizado}' vinculada com sucesso!")
                             time.sleep(1.5)
                             st.rerun()
-            
-            with tab_editar:
-                inst_cadastradas = db.listar_links()
-                if not inst_cadastradas:
-                    st.info("Nenhuma Instituição cadastrada para editar.")
-                else:
-                    opcoes_inst = {f"{inst[2]} - {inst[1]}": inst[0] for inst in inst_cadastradas}
-                    inst_selecionada_nome = st.selectbox("Selecione a Instituição para Editar:", options=list(opcoes_inst.keys()), key="edit_sel_inst")
-                    inst_id_selecionada = opcoes_inst[inst_selecionada_nome]
+        
+        with tab_editar:
+            inst_cadastradas = db.listar_links()
+            if not inst_cadastradas:
+                st.info("Nenhuma Instituição cadastrada para editar.")
+            else:
+                opcoes_inst = {f"{inst[2]} - {inst[1]}": inst[0] for inst in inst_cadastradas}
+                inst_selecionada_nome = st.selectbox("Selecione a Instituição para Editar:", options=list(opcoes_inst.keys()), key="edit_sel_inst")
+                inst_id_selecionada = opcoes_inst[inst_selecionada_nome]
 
-                    with db.conectar() as conn:
-                        cursor = conn.cursor()
-                        cursor.execute("SELECT grupo_id, nome_instituicao, host_id, item_down_id, item_up_id, capacidade_str FROM links WHERE id = ?", (inst_id_selecionada,))
-                        curr_grupo_id, curr_nome, curr_host_id, curr_item_down_id, curr_item_up_id, curr_cap = cursor.fetchone()
+                with db.conectar() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT grupo_id, nome_instituicao, host_id, item_down_id, item_up_id, capacidade_str FROM links WHERE id = ?", (inst_id_selecionada,))
+                    curr_grupo_id, curr_nome, curr_host_id, curr_item_down_id, curr_item_up_id, curr_cap = cursor.fetchone()
 
-                    idx_grupo = list(dict_grupos.values()).index(curr_grupo_id) if curr_grupo_id in dict_grupos.values() else 0
-                    grupo_sel_edit = st.selectbox("Grupo:", options=list(dict_grupos.keys()), index=idx_grupo, key="edit_grupo")
+                idx_grupo = list(dict_grupos.values()).index(curr_grupo_id) if curr_grupo_id in dict_grupos.values() else 0
+                grupo_sel_edit = st.selectbox("Grupo:", options=list(dict_grupos.keys()), index=idx_grupo, key="edit_grupo")
+                
+                idx_host = list(dict_hosts.values()).index(curr_host_id) if curr_host_id in dict_hosts.values() else 0
+                host_sel_edit = st.selectbox("Host no Zabbix:", options=list(dict_hosts.keys()), index=idx_host, key="edit_host")
+                
+                host_id_real_edit = dict_hosts[host_sel_edit]
+                itens_brutos_edit = get_items(zapi, host_id_real_edit)
+                dict_itens_edit = {i['name']: i['itemid'] for i in itens_brutos_edit}
+                
+                with st.form("form_link_editar"):
+                    nome_personalizado_edit = st.text_input("Nome da Instituição (para o relatório):", value=curr_nome, key="edit_nome_input")
                     
-                    idx_host = list(dict_hosts.values()).index(curr_host_id) if curr_host_id in dict_hosts.values() else 0
-                    host_sel_edit = st.selectbox("Host no Zabbix:", options=list(dict_hosts.keys()), index=idx_host, key="edit_host")
-                    
-                    host_id_real_edit = dict_hosts[host_sel_edit]
-                    itens_brutos_edit = get_items(zapi, host_id_real_edit)
-                    dict_itens_edit = {i['name']: i['itemid'] for i in itens_brutos_edit}
-                    
-                    with st.form("form_link_editar"):
-                        nome_personalizado_edit = st.text_input("Nome da Instituição (para o relatório):", value=curr_nome, key="edit_nome_input")
+                    if not dict_itens_edit:
+                        st.warning("Nenhuma interface encontrada neste host.")
+                        item_down_sel_edit, item_up_sel_edit = None, None
+                    else:
+                        idx_down = list(dict_itens_edit.values()).index(curr_item_down_id) if curr_item_down_id in dict_itens_edit.values() else 0
+                        idx_up = list(dict_itens_edit.values()).index(curr_item_up_id) if curr_item_up_id in dict_itens_edit.values() else 0
                         
+                        item_down_sel_edit = st.selectbox("Interface de DOWNLOAD (Entrada):", options=list(dict_itens_edit.keys()), index=idx_down, key="edit_down")
+                        item_up_sel_edit = st.selectbox("Interface de UPLOAD (Saída):", options=list(dict_itens_edit.keys()), index=idx_up, key="edit_up")
+                    
+                    cap_edit = st.text_input("Capacidade (ex: 1 Gbps, 500 Mbps)", value=curr_cap, key="edit_cap")
+                    
+                    col_btn1, col_space, col_btn2 = st.columns([2, 5, 2])
+                    with col_btn1:
+                        submit_edit = st.form_submit_button("Salvar Alterações", type="primary", use_container_width=True)
+                    with col_btn2:
+                        submit_delete = st.form_submit_button("Excluir Instituição", use_container_width=True)
+                    
+                    if submit_edit:
                         if not dict_itens_edit:
-                            st.warning("Nenhuma interface encontrada neste host.")
-                            item_down_sel_edit, item_up_sel_edit = None, None
+                            st.error("Erro: Host sem interfaces válidas.")
+                        elif not nome_personalizado_edit.strip():
+                            st.error("Erro: Nome em branco.")
                         else:
-                            idx_down = list(dict_itens_edit.values()).index(curr_item_down_id) if curr_item_down_id in dict_itens_edit.values() else 0
-                            idx_up = list(dict_itens_edit.values()).index(curr_item_up_id) if curr_item_up_id in dict_itens_edit.values() else 0
-                            
-                            item_down_sel_edit = st.selectbox("Interface de DOWNLOAD (Entrada):", options=list(dict_itens_edit.keys()), index=idx_down, key="edit_down")
-                            item_up_sel_edit = st.selectbox("Interface de UPLOAD (Saída):", options=list(dict_itens_edit.keys()), index=idx_up, key="edit_up")
-                        
-                        cap_edit = st.text_input("Capacidade (ex: 1 Gbps, 500 Mbps)", value=curr_cap, key="edit_cap")
-                        
-                        col_btn1, col_space, col_btn2 = st.columns([2, 5, 2])
-                        with col_btn1:
-                            submit_edit = st.form_submit_button("Salvar Alterações", type="primary", use_container_width=True)
-                        with col_btn2:
-                            submit_delete = st.form_submit_button("Excluir Instituição", use_container_width=True)
-                        
-                        if submit_edit:
-                            if not dict_itens_edit:
-                                st.error("Erro: Host sem interfaces válidas.")
-                            elif not nome_personalizado_edit.strip():
-                                st.error("Erro: Nome em branco.")
-                            else:
-                                with db.conectar() as conn:
-                                    cursor = conn.cursor()
-                                    cursor.execute('UPDATE links SET grupo_id=?, nome_instituicao=?, host_id=?, item_down_id=?, item_up_id=?, capacidade_str=? WHERE id=?', 
-                                                   (dict_grupos[grupo_sel_edit], nome_personalizado_edit, host_id_real_edit, dict_itens_edit[item_down_sel_edit], dict_itens_edit[item_up_sel_edit], cap_edit, inst_id_selecionada))
-                                    conn.commit()
-                                st.toast("Alterações salvas com sucesso!")
-                                time.sleep(1.2)
-                                st.rerun()
+                            with db.conectar() as conn:
+                                cursor = conn.cursor()
+                                cursor.execute('UPDATE links SET grupo_id=?, nome_instituicao=?, host_id=?, item_down_id=?, item_up_id=?, capacidade_str=? WHERE id=?', 
+                                               (dict_grupos[grupo_sel_edit], nome_personalizado_edit, host_id_real_edit, dict_itens_edit[item_down_sel_edit], dict_itens_edit[item_up_sel_edit], cap_edit, inst_id_selecionada))
+                                conn.commit()
+                            st.toast("Alterações salvas com sucesso!")
+                            time.sleep(1.2)
+                            st.rerun()
 
-                            if submit_delete:
-                                try:
-                                    with db.conectar() as conn:
-                                        cursor = conn.cursor()
-                                        cursor.execute("DELETE FROM links WHERE id=?", (inst_id_selecionada,))
-                                        conn.commit()
-                                    st.toast("Instituição excluída com sucesso!")
-                                    time.sleep(1.2)
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error("Não foi possível excluir. (Existem relatórios atrelados no histórico)")
+                    if submit_delete:
+                        try:
+                            with db.conectar() as conn:
+                                cursor = conn.cursor()
+                                cursor.execute("DELETE FROM links WHERE id=?", (inst_id_selecionada,))
+                                conn.commit()
+                            st.toast("Instituição excluída com sucesso!")
+                            time.sleep(1.2)
+                            st.rerun()
+                        except Exception as e:
+                            st.error("Não foi possível excluir. (Existem relatórios atrelados no histórico)")
 
 elif page == "Historico":
-    # --- PÁGINA: HISTÓRICO ---
     col_tit, col_btn = st.columns([8, 2])
     with col_tit:
         st.markdown("<h3 style='margin-bottom: 20px;'><i class='fa-solid fa-folder-open' style='color: #F39C12; margin-right: 10px;'></i> Histórico de Relatórios</h3>", unsafe_allow_html=True)
@@ -835,7 +997,6 @@ elif page == "Historico":
     if not historico:
         st.info("Nenhum relatório foi gerado e salvo no banco de dados ainda.")
     else:
-        # Cruza os dados do histórico para descobrir o "Grupo" de cada Instituição via SQL direto no Pandas
         with db.conectar() as conn:
             links_raw = conn.execute("SELECT nome_instituicao, grupo_id FROM links").fetchall()
             grupos_raw = conn.execute("SELECT id, nome FROM grupos").fetchall()
@@ -843,10 +1004,7 @@ elif page == "Historico":
             mapa_inst_grupo = {l[0]: mapa_grupos.get(l[1], "Sem Grupo") for l in links_raw}
 
         df_hist = pd.DataFrame(historico, columns=["Data Geração", "Instituição", "Período Referência", "Caminho Arquivo"])
-        # Adiciona a coluna de Grupo mapeando os dados
         df_hist["Grupo"] = df_hist["Instituição"].map(mapa_inst_grupo).fillna("Excluído/Desconhecido")
-        
-        # Converte a Coluna de Data para DateTime facilitando os filtros abaixo
         df_hist["Data Geração DT"] = pd.to_datetime(df_hist["Data Geração"], errors='coerce')
 
         st.markdown("#### <i class='fa-solid fa-filter' style='color: #3498DB; margin-right: 8px;'></i> Filtrar Histórico", unsafe_allow_html=True)
@@ -861,7 +1019,6 @@ elif page == "Historico":
             opcoes_tempo = ["Todo o tempo", "Hoje", "Últimos 7 dias", "Últimos 30 dias", "Últimos 3 meses", "Personalizado"]
             filtro_tempo = st.selectbox("Filtrar por Data:", options=opcoes_tempo, index=0)
             
-        # Se escolher Personalizado, abre o seletor de duas datas na linha de baixo
         if filtro_tempo == "Personalizado":
             col_dt1, col_dt2, _ = st.columns([1, 1, 2])
             with col_dt1:
@@ -869,13 +1026,11 @@ elif page == "Historico":
             with col_dt2:
                 dt_fim_hist = st.date_input("Até:", value=date.today(), key="hist_dt_fim")
             
-        # Aplicação dos Filtros Simples no Dataframe
         if filtro_grupo != "Todos":
             df_hist = df_hist[df_hist["Grupo"] == filtro_grupo]
         if busca_texto:
             df_hist = df_hist[df_hist["Instituição"].str.contains(busca_texto, case=False, na=False)]
             
-        # Aplicação do Filtro Inteligente de Datas
         hoje = pd.Timestamp(date.today())
         if filtro_tempo == "Hoje":
             df_hist = df_hist[df_hist["Data Geração DT"] >= hoje]
@@ -886,7 +1041,7 @@ elif page == "Historico":
         elif filtro_tempo == "Últimos 3 meses":
             df_hist = df_hist[df_hist["Data Geração DT"] >= (hoje - pd.Timedelta(days=90))]
         elif filtro_tempo == "Personalizado":
-            fim_inclusivo = pd.Timestamp(dt_fim_hist) + pd.Timedelta(days=1) # +1 dia para cobrir até às 23:59h do dia escolhido
+            fim_inclusivo = pd.Timestamp(dt_fim_hist) + pd.Timedelta(days=1)
             df_hist = df_hist[(df_hist["Data Geração DT"] >= pd.Timestamp(dt_inicio_hist)) & (df_hist["Data Geração DT"] < fim_inclusivo)]
 
         st.dataframe(df_hist[["Data Geração", "Grupo", "Instituição", "Período Referência"]], use_container_width=True, hide_index=True)

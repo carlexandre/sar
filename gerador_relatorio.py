@@ -1,364 +1,449 @@
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-import pandas as pd
 from fpdf import FPDF
-import tempfile
 import os
 import textwrap
+import tempfile
 from datetime import date
+from io import BytesIO
 
-# --- 1. CONFIGURAÇÃO DE TEXTOS ---
+# =============================================================================
+# TEXTOS PADRÃO DO RELATÓRIO
+# =============================================================================
 TEXTOS = {
     "introducao": (
-        "Este relatório apresenta a análise técnica de tráfego de dados referente à {instituicao}, "
-        "focando no monitoramento do link de conectividade. A análise abrange a conexão da instituição "
+        "Este relatório apresenta a análise técnica de tráfego de dados referente a {alvo}, "
+        "focando no monitoramento dos links de conectividade. A análise abrange a conexão "
         "à rede metropolitana GigaFOR e o acesso ao backbone nacional da RNP.\n\n"
         "O objetivo principal é monitorar o comportamento do tráfego na interface de borda, "
-        "identificar a taxa de ocupação do link e garantir a disponibilidade dos serviços."
+        "identificar as taxas de ocupação dos links e garantir a disponibilidade dos serviços de rede."
     ),
     "sobre_rnp": (
         "A Rede Nacional de Ensino e Pesquisa (RNP) é a organização responsável por prover a "
         "infraestrutura de rede avançada que conecta as instituições de ensino e pesquisa no Brasil. "
         "Ela viabiliza a colaboração científica e tecnológica, oferecendo serviços de conectividade "
-        "de alta velocidade."
+        "de alta velocidade e baixa latência para todo o território nacional."
     ),
     "sobre_gigafor": (
         "A GigaFOR é a Rede Metropolitana de Educação e Pesquisa de Fortaleza. Trata-se da "
         "infraestrutura de fibra óptica de alto desempenho que conecta a instituição ao "
-        "Ponto de Presença da RNP no Ceará (PoP-CE)."
-    )
+        "Ponto de Presença da RNP no Ceará (PoP-CE), garantindo acesso ao backbone nacional "
+        "com qualidade e redundância."
+    ),
+    "conclusao": (
+        "A análise do período de {periodo} demonstra o comportamento do tráfego de rede da {instituicao} "
+        "na interface monitorada pelo PoP-CE. Os dados apresentados refletem o consumo real do link "
+        "contratado, permitindo identificar padrões de uso, picos de demanda e eventuais ocorrências "
+        "que possam impactar a qualidade dos serviços de conectividade.\n\n"
+        "Este segmento do relatório foi gerado automaticamente pelo Sistema de Automatização de Relatórios (SAR) "
+        "do Ponto de Presença da RNP no Ceará."
+    ),
 }
 
-# --- 2. FUNÇÃO DE GERAR GRÁFICO (ESTILO ZABBIX) ---
-def gerar_grafico_trafego(df, nome_instituicao):
+# =============================================================================
+# HELPERS
+# =============================================================================
+
+def _enc(texto: str) -> str:
+    """Converte texto para latin-1, substituindo caracteres inválidos."""
+    try:
+        return str(texto).encode('latin-1', 'replace').decode('latin-1')
+    except Exception:
+        return str(texto)
+
+def _salvar_grafico_temp(grafico_bytes: BytesIO) -> str | None:
     """
-    Gera gráfico simulando a interface clara do Zabbix.
-    Aplica suavização (1h max) se houver muitos dados, para limpar o ruído visual 
-    sem perder a métrica dos picos de saturação.
+    Salva o BytesIO do gráfico em um arquivo temporário e retorna o caminho.
     """
-    df_plot = df.copy()
-    
-    # SUAVIZAÇÃO VISUAL (Resampling)
-    if len(df_plot) > 500:
-        df_plot = df_plot.set_index('clock')
-        # Pega o MAX de cada hora para o gráfico não esconder picos reais de banda
-        # CORREÇÃO: Uso de '1h' (minúsculo) para compatibilidade com versões novas do Pandas
-        df_plot = df_plot.resample('1h').max().reset_index()
+    if not grafico_bytes:
+        return None
+    try:
+        grafico_bytes.seek(0)
+        conteudo = grafico_bytes.read()
+        if not conteudo:
+            return None
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+            tmp.write(conteudo)
+            tmp.flush()
+            return tmp.name
+    except Exception:
+        return None
 
-    # Define o fundo para claro (Estilo Zabbix Clássico)
-    plt.style.use('default') 
-    
-    # Ajuste de tamanho (largura aumentada de 10.5 para 14 para ficar mais largo/panorâmico)
-    fig, ax = plt.subplots(figsize=(14, 4.5))
-    fig.patch.set_facecolor('white')
-    ax.set_facecolor('#f8f9fa') # Cinza super claro no fundo do gráfico
-    
-    # --- PLOTAGEM ---
-    # Download (Verde com preenchimento)
-    ax.fill_between(df_plot['clock'], df_plot['recv_mbps'], color='#34c759', alpha=0.3, linewidth=0)
-    ax.plot(df_plot['clock'], df_plot['recv_mbps'], color='#27ae60', linewidth=1.2)
-    
-    # Upload (Vermelho apenas em linha fina)
-    ax.plot(df_plot['clock'], df_plot['sent_mbps'], color='#e74c3c', linewidth=1.2)
-    
-    # --- ESTÉTICA DO ZABBIX ---
-    ax.set_title(f"{nome_instituicao}: Network traffic", fontsize=12, color='#333333', pad=15)
-    ax.set_ylabel("Mbps", color='#333333', fontsize=9)
-    
-    # Rótulos no eixo Y em ambos os lados e rótulos X em vermelho na vertical
-    ax.tick_params(axis='y', colors='#333333', labelsize=9, labelright=True)
-    ax.tick_params(axis='x', colors='#e74c3c', labelsize=9, rotation=90)
-    
-    # Grid pontilhado idêntico ao Zabbix
-    ax.grid(True, which='major', color='#cccccc', linestyle='--', linewidth=0.7)
-    
-    # Eixo X (Datas formatadas)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%d/%m %H:%M'))
-    
-    # Bordas limpas
-    ax.spines['top'].set_color('#cccccc')
-    ax.spines['right'].set_color('#cccccc')
-    ax.spines['left'].set_color('#cccccc')
-    ax.spines['bottom'].set_color('#cccccc')
-    
-    # --- LIMITES DO EIXO Y (Topagem de 1000 Mbps) ---
-    if not df_plot.empty:
-        max_trafego = max(df_plot['recv_mbps'].max(), df_plot['sent_mbps'].max())
-        ax.set_xlim(df_plot['clock'].min(), df_plot['clock'].max())
-        # Força a topagem para 1000. Se o tráfego passar de 1000, adapta-se para não cortar.
-        ax.set_ylim(0, max(1000, max_trafego * 1.05))
+# =============================================================================
+# CLASSE DO PDF
+# =============================================================================
 
-    # --- CRIAÇÃO DA TABELA DE LEGENDA (Abaixo do Gráfico) ---
-    if not df.empty:
-        # Usa os dados originais (não suavizados) para obter a precisão real nas estatísticas
-        in_last = df['recv_mbps'].iloc[-1]
-        in_min = df['recv_mbps'].min()
-        in_avg = df['recv_mbps'].mean()
-        in_max = df['recv_mbps'].max()
-        
-        out_last = df['sent_mbps'].iloc[-1]
-        out_min = df['sent_mbps'].min()
-        out_avg = df['sent_mbps'].mean()
-        out_max = df['sent_mbps'].max()
-
-        # Texto monoespaçado para a tabela alinhar perfeitamente
-        legenda_texto = (
-            f"                            último         mín           méd           máx\n"
-            f"[🟩] Download (Entrada)  {in_last:>8.2f} Mbps  {in_min:>8.2f} Mbps  {in_avg:>8.2f} Mbps  {in_max:>8.2f} Mbps\n"
-            f"[🟥] Upload   (Saída)    {out_last:>8.2f} Mbps  {out_min:>8.2f} Mbps  {out_avg:>8.2f} Mbps  {out_max:>8.2f} Mbps"
-        )
-    else:
-        legenda_texto = "Sem dados para o período."
-
-    # Levanta a caixa do gráfico para caber o texto por baixo
-    plt.subplots_adjust(bottom=0.35)
-    
-    # Imprime a tabela monoespaçada no canto esquerdo inferior (tamanho de fonte compensado para a nova largura)
-    fig.text(0.08, 0.02, legenda_texto, family='monospace', fontsize=10, va='bottom', color='#333333')
-
-    # Salva
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-    plt.savefig(temp_file.name, dpi=150, facecolor='white', bbox_inches='tight')
-    plt.close()
-    
-    return temp_file.name
-
-# --- 3. CLASSE DO PDF (ESTRUTURA COM CAPA, CABEÇALHO E RODAPÉ) ---
 class RelatorioPDF(FPDF):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.pop_ce_logo = "assets/logo/pop-ce-logo-preto.png"
-        self.rnp_logo = "assets/logo/rnp-logo-preto.png" 
+
+    LOGO_POPCE = "assets/logo/pop-ce-logo-preto.png"
+    LOGO_RNP   = "assets/logo/rnp-logo-preto.png"
+
+    COR_TITULO_FUNDO = (230, 230, 230)
+    COR_TITULO_TEXTO = (30, 30, 30)
+    COR_CORPO        = (50, 50, 50)
+    COR_HEADER_TAB   = (200, 200, 200)
+    COR_LINHA_PAR    = (248, 248, 248)
+    COR_ALERTA       = (220, 50, 50)
 
     def header(self):
-        if self.page_no() > 1:
-            if os.path.exists(self.pop_ce_logo):
-                self.image(self.pop_ce_logo, 85, 8, 40)
-                self.set_y(24) 
-            else:
-                self.set_font('Arial', 'B', 14)
-                self.cell(0, 10, 'PoP-CE', 0, 1, 'C')
-            
-            self.set_font('Arial', 'B', 8)
+        if self.page_no() == 1:
+            return
+
+        if os.path.exists(self.LOGO_POPCE):
+            self.image(self.LOGO_POPCE, x=85, y=8, w=40)
+            self.set_y(26)
+        else:
+            self.set_font('Arial', 'B', 13)
             self.set_text_color(50, 50, 50)
-            self.cell(0, 4, 'PONTO DE PRESENÇA', 0, 1, 'C')
-            self.cell(0, 4, 'DA RNP CEARÁ', 0, 1, 'C')
-            self.ln(8) 
+            self.cell(0, 10, 'PoP-CE', border=0, new_x='LMARGIN', new_y='NEXT', align='C')
+
+        self.set_font('Arial', 'B', 7)
+        self.set_text_color(80, 80, 80)
+        self.cell(0, 4, 'PONTO DE PRESENÇA DA RNP CEARÁ', border=0, new_x='LMARGIN', new_y='NEXT', align='C')
+        self.set_draw_color(180, 180, 180)
+        self.line(10, self.get_y() + 2, 200, self.get_y() + 2)
+        self.ln(6)
 
     def footer(self):
-        if self.page_no() > 1:
-            if os.path.exists(self.rnp_logo):
-                self.image(self.rnp_logo, 80, 276, 50) 
-            else:
-                self.set_y(-20)
-                self.set_font('Arial', 'B', 12)
-                self.set_text_color(50, 50, 50)
-                self.cell(0, 10, 'RNP', 0, 0, 'C')
+        if self.page_no() == 1:
+            return
 
-            self.set_y(-15)
-            self.set_font('Arial', '', 10)
-            self.set_text_color(0, 0, 0)
-            self.cell(0, 10, str(self.page_no()), 0, 0, 'R')
+        self.set_y(-25)
+        self.set_draw_color(180, 180, 180)
+        self.line(10, self.get_y(), 200, self.get_y())
 
-    def gerar_capa(self, instituicao, periodo):
+        if os.path.exists(self.LOGO_RNP):
+            self.image(self.LOGO_RNP, x=80, y=276, w=50)
+
+        self.set_y(-13)
+        self.set_font('Arial', '', 8)
+        self.set_text_color(120, 120, 120)
+        self.cell(0, 8, f'Página {self.page_no()}', border=0, align='R')
+
+    # ------------------------------------------------------------------
+    # CAPA
+    # ------------------------------------------------------------------
+
+    def gerar_capa(self, nome_instituicao: str, periodo: str):
         self.add_page()
-        
-        if os.path.exists(self.pop_ce_logo):
-            self.image(self.pop_ce_logo, 70, 40, 70)
-        
-        self.set_y(95)
-        self.set_font('Arial', 'B', 14)
-        self.set_text_color(50, 50, 50)
-        self.cell(0, 6, 'PONTO DE PRESENÇA', 0, 1, 'C')
-        self.cell(0, 6, 'DA RNP CEARÁ', 0, 1, 'C')
-        
-        self.ln(25)
-        self.set_font('Arial', 'B', 18)
-        self.set_text_color(0, 0, 0)
-        self.cell(0, 8, 'RELATÓRIO TÉCNICO DE', 0, 1, 'C')
-        self.cell(0, 8, 'MONITORAMENTO DE TRÁFEGO', 0, 1, 'C')
-        
-        self.ln(10)
-        self.set_font('Arial', '', 14)
-        self.cell(0, 8, 'Rede GigaFOR / POP-CE', 0, 1, 'C')
-        
-        self.ln(25)
-        self.set_font('Arial', '', 12)
-        self.cell(0, 6, 'Período de Referência:', 0, 1, 'C')
-        self.set_font('Arial', 'B', 12)
-        self.cell(0, 6, periodo, 0, 1, 'C')
-        
-        self.ln(20)
-        self.set_font('Arial', 'B', 14)
-        self.cell(0, 8, instituicao, 0, 1, 'C')
-        
-        self.set_y(-30)
-        self.set_font('Arial', '', 10)
-        data_atual = date.today().strftime('%d/%m/%Y')
-        self.cell(0, 10, f'Fortaleza - CE - {data_atual}', 0, 0, 'C')
+        if os.path.exists(self.LOGO_POPCE):
+            self.image(self.LOGO_POPCE, x=70, y=40, w=70)
 
-    def capitulo_titulo(self, titulo):
+        self.set_y(105)
+        self.set_font('Arial', 'B', 13)
+        self.set_text_color(80, 80, 80)
+        self.cell(0, 7, _enc('PONTO DE PRESENÇA DA RNP CEARÁ'), border=0, new_x='LMARGIN', new_y='NEXT', align='C')
+
+        self.set_draw_color(180, 180, 180)
+        self.line(40, self.get_y() + 3, 170, self.get_y() + 3)
+        self.ln(14)
+
+        self.set_font('Arial', 'B', 20)
+        self.set_text_color(20, 20, 20)
+        self.cell(0, 9, _enc('RELATÓRIO TÉCNICO DE'), border=0, new_x='LMARGIN', new_y='NEXT', align='C')
+        self.cell(0, 9, _enc('MONITORAMENTO DE TRÁFEGO'), border=0, new_x='LMARGIN', new_y='NEXT', align='C')
+
+        self.ln(6)
+        self.set_font('Arial', '', 13)
+        self.set_text_color(80, 80, 80)
+        self.cell(0, 7, _enc('Rede GigaFOR / PoP-CE'), border=0, new_x='LMARGIN', new_y='NEXT', align='C')
+
+        self.ln(18)
+        self.set_font('Arial', '', 11)
+        self.set_text_color(100, 100, 100)
+        self.cell(0, 6, 'Período de Referência:', border=0, new_x='LMARGIN', new_y='NEXT', align='C')
         self.set_font('Arial', 'B', 12)
-        self.set_text_color(0, 0, 0)
-        self.set_fill_color(240, 240, 240)
-        self.cell(0, 8, titulo, 0, 1, 'L', fill=True)
+        self.set_text_color(30, 30, 30)
+        self.cell(0, 7, _enc(periodo), border=0, new_x='LMARGIN', new_y='NEXT', align='C')
+
+        self.ln(10)
+        self.set_font('Arial', 'B', 15)
+        self.set_text_color(20, 20, 20)
+        self.multi_cell(0, 7, _enc(nome_instituicao), border=0, align='C')
+
+        self.set_y(-35)
+        self.set_font('Arial', '', 9)
+        self.set_text_color(130, 130, 130)
+        self.cell(0, 5, _enc(f'Fortaleza - CE   |   Gerado em {date.today().strftime("%d/%m/%Y")}'),
+                  border=0, align='C')
+
+    # ------------------------------------------------------------------
+    # HELPERS DE CONTEÚDO
+    # ------------------------------------------------------------------
+
+    def checar_espaco(self, espaco_necessario: float):
+        """Evita títulos órfãos ou blocos cortados pulando página se faltar espaço."""
+        if self.get_y() + espaco_necessario > 267: # 297(A4) - 30(Margin) = 267
+            self.add_page()
+
+    def secao_titulo(self, numero: str, titulo: str):
+        self.checar_espaco(15) # Título pede ao menos 15mm para não ficar sozinho
+        self.set_font('Arial', 'B', 11)
+        self.set_text_color(*self.COR_TITULO_TEXTO)
+        self.set_fill_color(*self.COR_TITULO_FUNDO)
+        self.cell(0, 8, _enc(f'{numero}  {titulo}'), border=0,
+                  new_x='LMARGIN', new_y='NEXT', align='L', fill=True)
         self.ln(2)
 
-    def corpo_texto(self, texto):
-        self.set_font('Arial', '', 11)
-        self.set_text_color(30, 30, 30)
-        try:
-            texto = texto.encode('latin-1', 'replace').decode('latin-1')
-        except:
-            pass
-        self.multi_cell(0, 6, texto)
-        self.ln(5)
+    def subsecao_titulo(self, texto: str):
+        self.checar_espaco(12) # Subtítulo pede ao menos 12mm
+        self.set_font('Arial', 'B', 10)
+        self.set_text_color(60, 60, 60)
+        self.cell(0, 6, _enc(texto), border=0, new_x='LMARGIN', new_y='NEXT', align='L')
+        self.ln(1)
 
-    def tabela_alertas(self, lista_alertas):
+    def corpo_texto(self, texto: str):
+        self.set_font('Arial', '', 10)
+        self.set_text_color(*self.COR_CORPO)
+        self.multi_cell(0, 5.5, _enc(texto))
+        self.ln(4)
+
+    def linha_dado(self, rotulo: str, valor: str, fill: bool = False):
+        self.checar_espaco(7)
+        self.set_fill_color(*self.COR_LINHA_PAR)
         self.set_font('Arial', 'B', 9)
-        self.set_text_color(0, 0, 0)
-        self.set_fill_color(220, 220, 220)
-        self.cell(35, 7, 'Data', 1, 0, 'C', True)
-        self.cell(85, 7, 'Tipo de Alerta (Trigger)', 1, 0, 'C', True)
-        self.cell(30, 7, 'Duração', 1, 0, 'C', True)
-        self.cell(40, 7, 'Campus', 1, 1, 'C', True)
-        
+        self.set_text_color(60, 60, 60)
+        self.cell(65, 7, _enc(rotulo), border='B', fill=fill)
         self.set_font('Arial', '', 9)
-        if not lista_alertas:
+        self.set_text_color(30, 30, 30)
+        self.cell(0, 7, _enc(valor), border='B', new_x='LMARGIN', new_y='NEXT', fill=fill)
+
+    def tabela_stats(self, stats: dict):
+        self.checar_espaco(25)
+        media_in  = stats.get('media_in', 0)
+        media_out = stats.get('media_out', 0)
+        max_in    = stats.get('max_in', 0)
+        max_out   = stats.get('max_out', 0)
+
+        dados = [
+            ('Tráfego Médio - Entrada (Download)', f'{media_in:.2f} Mbps',
+             'Tráfego Médio - Saída (Upload)',     f'{media_out:.2f} Mbps'),
+            ('Pico Máximo - Entrada (Download)',   f'{max_in:.2f} Mbps',
+             'Pico Máximo - Saída (Upload)',       f'{max_out:.2f} Mbps'),
+        ]
+
+        col_w = 95
+        for rotulo1, val1, rotulo2, val2 in dados:
+            self.set_fill_color(*self.COR_HEADER_TAB)
+            self.set_font('Arial', 'B', 8)
+            self.set_text_color(40, 40, 40)
+            self.cell(col_w, 6, _enc(rotulo1), border=1, fill=True)
+            self.cell(col_w, 6, _enc(rotulo2), border=1, new_x='LMARGIN', new_y='NEXT', fill=True)
+            self.set_fill_color(255, 255, 255)
+            self.set_font('Arial', 'B', 11)
+            self.set_text_color(20, 20, 20)
+            self.cell(col_w, 8, _enc(val1), border=1, align='C', fill=True)
+            self.cell(col_w, 8, _enc(val2), border=1, align='C', new_x='LMARGIN', new_y='NEXT', fill=True)
             self.ln(2)
-            self.cell(190, 7, 'Nenhuma ocorrência crítica registrada.', 1, 1, 'C')
+
+    def tabela_alertas(self, lista_alertas: list):
+        self.checar_espaco(20)
+        self.set_fill_color(*self.COR_HEADER_TAB)
+        self.set_font('Arial', 'B', 9)
+        self.set_text_color(30, 30, 30)
+        self.cell(32, 7, 'Data/Hora',        border=1, align='C', fill=True)
+        self.cell(90, 7, 'Descrição do Alerta', border=1, align='C', fill=True)
+        self.cell(28, 7, 'Duração',          border=1, align='C', fill=True)
+        self.cell(40, 7, 'Equipamento',      border=1, align='C', new_x='LMARGIN', new_y='NEXT', fill=True)
+
+        if not lista_alertas:
+            self.set_font('Arial', 'I', 9)
+            self.set_text_color(100, 100, 100)
+            self.cell(190, 7, 'Nenhuma ocorrência crítica registrada no período.',
+                      border=1, new_x='LMARGIN', new_y='NEXT', align='C')
+            self.ln(6)
+            return
+
+        self.set_font('Arial', '', 9)
+        for idx, alerta in enumerate(lista_alertas):
+            if isinstance(alerta, dict):
+                trig      = _enc(alerta.get('trigger', '-'))
+                host      = _enc(alerta.get('host', '-'))
+                dt_alerta = _enc(alerta.get('data', '-'))
+                duracao   = _enc(alerta.get('duracao', '-'))
+            else:
+                trig, host, dt_alerta, duracao = _enc(str(alerta)), '-', '-', '-'
+
+            if len(host) > 24:
+                host = host[:21] + '...'
+
+            linhas_trig = textwrap.wrap(trig, width=52)
+            num_linhas  = max(1, len(linhas_trig))
+            altura      = 6 * num_linhas
+
+            if self.get_y() + altura > 267:
+                self.add_page()
+                self.set_fill_color(*self.COR_HEADER_TAB)
+                self.set_font('Arial', 'B', 9)
+                self.set_text_color(30, 30, 30)
+                self.cell(32, 7, 'Data/Hora',           border=1, align='C', fill=True)
+                self.cell(90, 7, 'Descrição do Alerta', border=1, align='C', fill=True)
+                self.cell(28, 7, 'Duração',             border=1, align='C', fill=True)
+                self.cell(40, 7, 'Equipamento',         border=1, align='C', new_x='LMARGIN', new_y='NEXT', fill=True)
+                self.set_font('Arial', '', 9)
+
+            fill = (idx % 2 == 0)
+            self.set_fill_color(*self.COR_LINHA_PAR)
+
+            if duracao in ('Ativo/S.Rec.', 'Ativo'):
+                self.set_fill_color(255, 235, 235)
+                fill = True
+
+            y0 = self.get_y()
+
+            self.set_text_color(40, 40, 40)
+            self.cell(32, altura, dt_alerta, border=1, align='C', fill=fill)
+
+            x_trig = self.get_x()
+            if num_linhas == 1:
+                self.cell(90, altura, trig, border=1, align='L', fill=fill)
+            else:
+                self.cell(90, altura, '', border=1, align='L', fill=fill)
+                self.set_xy(x_trig + 1, y0 + 1)
+                self.multi_cell(88, 6, trig, border=0, align='L')
+                self.set_xy(x_trig + 90, y0)
+
+            x_dur = self.get_x()
+            if duracao in ('Ativo/S.Rec.', 'Ativo'):
+                self.set_text_color(*self.COR_ALERTA)
+            self.cell(28, altura, duracao, border=1, align='C', fill=fill)
+            self.set_text_color(40, 40, 40)
+
+            x_host = self.get_x()
+            self.cell(40, altura, host, border=1, align='C', new_x='LMARGIN', new_y='NEXT', fill=fill)
+
+        self.ln(8)
+
+    def bloco_observacao(self, stats: dict):
+        self.checar_espaco(25)
+        max_in  = stats.get('max_in', 0)
+        max_out = stats.get('max_out', 0)
+
+        if max_in > 900 or max_out > 900:
+            icone = '[!]'
+            obs = f'O tráfego atingiu picos críticos no período analisado (Entrada: {max_in:.1f} Mbps  /  Saída: {max_out:.1f} Mbps). Recomenda-se avaliação da capacidade do link contratado.'
+            self.set_fill_color(255, 235, 220)
+        elif max_in > 700 or max_out > 700:
+            icone = '[~]'
+            obs = f'O link apresentou utilização elevada no período (Entrada: {max_in:.1f} Mbps  /  Saída: {max_out:.1f} Mbps). Monitoramento contínuo é recomendado.'
+            self.set_fill_color(255, 248, 220)
         else:
-            for alerta in lista_alertas:
-                trig = str(alerta.get('trigger', '-'))
-                host = str(alerta.get('host', '-'))
-                if len(host) > 22: host = host[:19] + "..."
-                
-                try:
-                    trig = trig.encode('latin-1', 'replace').decode('latin-1')
-                    host = host.encode('latin-1', 'replace').decode('latin-1')
-                except:
-                    pass
+            icone = '[OK]'
+            obs = f'O link operou dentro da normalidade no período analisado (Entrada: {max_in:.1f} Mbps  /  Saída: {max_out:.1f} Mbps).'
+            self.set_fill_color(230, 248, 235)
 
-                linhas_trig = textwrap.wrap(trig, width=48)
-                num_linhas = max(1, len(linhas_trig))
-                altura_linha = 7
-                altura_total = altura_linha * num_linhas
-                
-                if self.get_y() + altura_total > 270:
-                    self.add_page()
-                    
-                x_atual = self.get_x()
-                y_atual = self.get_y()
-                
-                self.rect(x_atual, y_atual, 35, altura_total)
-                self.cell(35, altura_total, str(alerta.get('data', '-')), border=0, align='C')
-                
-                x_trigger = self.get_x()
-                self.rect(x_trigger, y_atual, 85, altura_total)
-                
-                if num_linhas == 1:
-                    self.cell(85, altura_total, trig, border=0, align='L')
-                else:
-                    self.set_xy(x_trigger + 1, y_atual + 1) 
-                    self.multi_cell(83, 5, trig, border=0, align='L')
-                    self.set_xy(x_trigger + 85, y_atual) 
-                    
-                x_duracao = self.get_x()
-                self.rect(x_duracao, y_atual, 30, altura_total)
-                self.cell(30, altura_total, str(alerta.get('duracao', '-')), border=0, align='C')
-                
-                x_campus = self.get_x()
-                self.rect(x_campus, y_atual, 40, altura_total)
-                self.cell(40, altura_total, host, border=0, ln=1, align='C')
-                
-        self.ln(10)
+        self.set_font('Arial', 'B', 9)
+        self.set_text_color(40, 40, 40)
+        self.cell(0, 6, _enc(f'Observação Automática  {icone}'), border=0, new_x='LMARGIN', new_y='NEXT', fill=True)
+        self.set_font('Arial', '', 9)
+        self.set_text_color(50, 50, 50)
+        self.multi_cell(0, 5, _enc(obs), fill=True)
+        self.ln(6)
 
-# --- 4. FUNÇÃO PRINCIPAL ---
-def criar_pdf_completo(dados_trafego, infos_relatorio, lista_alertas=None, estatisticas=None):
-    pdf = RelatorioPDF()
-    pdf.set_auto_page_break(auto=True, margin=20)
+
+# =============================================================================
+# FUNÇÃO PRINCIPAL
+# =============================================================================
+
+def criar_pdf_completo(
+    lista_dados: list,
+    dt_inicio: date,
+    dt_fim: date
+) -> bytes:
+    """
+    Gera o PDF agrupando os relatórios de múltiplas instituições em um único documento.
+    """
     
-    # 1. GERAÇÃO DA CAPA (Página 1)
-    pdf.gerar_capa(infos_relatorio['instituicao'], infos_relatorio['periodo'])
+    nomes_instituicoes = [d['infos']['instituicao'] for d in lista_dados]
+    if len(nomes_instituicoes) > 1:
+        str_nomes = ", ".join(nomes_instituicoes[:-1]) + " e " + nomes_instituicoes[-1]
+    else:
+        str_nomes = nomes_instituicoes[0]
+
+    periodo = f"{dt_inicio.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}"
+
+    # ---- Monta o objeto PDF (Margem inferior elevada para 30 para fugir do footer) ----
+    pdf = RelatorioPDF(orientation='P', unit='mm', format='A4')
+    pdf.set_auto_page_break(auto=True, margin=30) 
+    pdf.set_margins(left=10, top=10, right=10)
+
+    # ---- PÁGINA 1: CAPA ----
+    pdf.gerar_capa(nome_instituicao=str_nomes, periodo=periodo)
+
+    # ---- PÁGINA 2: INTRODUÇÃO (Global) ----
+    pdf.add_page()
+    pdf.secao_titulo('1.', 'Introdução')
     
-    # 2. CONTEÚDO (Início na Página 2 com cabeçalho/rodapé ativados)
-    pdf.add_page() 
-    
-    # Introdução
-    pdf.capitulo_titulo("2. Introdução")
-    pdf.corpo_texto(TEXTOS['introducao'].format(instituicao=infos_relatorio['instituicao']))
-    pdf.capitulo_titulo("2.1. Sobre a RNP")
+    texto_intro_adaptado = TEXTOS['introducao'].replace('{alvo}', str_nomes)
+    pdf.corpo_texto(texto_intro_adaptado)
+
+    pdf.secao_titulo('1.1.', 'Sobre a RNP - Rede Nacional de Ensino e Pesquisa')
     pdf.corpo_texto(TEXTOS['sobre_rnp'])
-    pdf.capitulo_titulo("2.2. Sobre a GigaFOR")
+
+    pdf.secao_titulo('1.2.', 'Sobre a GigaFOR - Rede Metropolitana de Fortaleza')
     pdf.corpo_texto(TEXTOS['sobre_gigafor'])
-    
-    pdf.add_page() 
 
-    # Análise Gráfica
-    pdf.capitulo_titulo("3. Análise de Tráfego por Unidade")
-    pdf.set_font('Arial', 'B', 11)
-    pdf.cell(0, 6, f"3.1. Instituição: {infos_relatorio['instituicao']}", 0, 1)
-    pdf.set_font('Arial', '', 10)
-    pdf.cell(0, 6, f"Link Contratado/Capacidade: {infos_relatorio.get('capacidade', '1 Gbps')}", 0, 1)
-    pdf.ln(3)
-    
-    # O gráfico já inclui a legenda Zabbix internamente, então removemos a instrução de legenda em texto manual daqui
-    caminho_img = gerar_grafico_trafego(dados_trafego, infos_relatorio['instituicao'])
-    pdf.image(caminho_img, x=10, w=190)
-    os.remove(caminho_img)
-    
-    # Damos um pulo de linha maior porque a tabela do gráfico já faz o trabalho da legenda
-    pdf.ln(8)
+    # ---- SEÇÕES DINÂMICAS: UMA PARA CADA INSTITUIÇÃO ----
+    num_secao = 2
+    for dados in lista_dados:
+        inst = dados['infos'].get('instituicao', 'Instituição')
+        cap = dados['infos'].get('capacidade', 'N/D')
+        grafico_bytes = dados.get('grafico_bytes')
+        alertas = dados.get('alertas', [])
+        stats = dados.get('stats', {})
 
-    # Estatísticas
-    if estatisticas:
-        media_in = estatisticas['media_in']
-        media_out = estatisticas['media_out']
-        max_in = estatisticas['max_in']
-        max_out = estatisticas['max_out']
-    else:
-        media_in = dados_trafego['recv_mbps'].mean()
-        media_out = dados_trafego['sent_mbps'].mean()
-        max_in = dados_trafego['recv_mbps'].max()
-        max_out = dados_trafego['sent_mbps'].max()
-    
-    pdf.set_font('Arial', 'B', 10)
-    pdf.cell(0, 6, "Análise Técnica", 0, 1)
-    pdf.set_font('Arial', '', 10)
-    
-    stats = (
-        f"Tráfego Médio (Entrada): {media_in:.2f} Mbps\n"
-        f"Tráfego Médio (Saída): {media_out:.2f} Mbps\n"
-        f"Pico Máximo (Entrada): {max_in:.2f} Mbps\n"
-        f"Pico Máximo (Saída): {max_out:.2f} Mbps\n"
-    )
-    pdf.multi_cell(0, 6, stats)
-    pdf.ln(2)
-    
-    pdf.set_font('Arial', 'B', 10)
-    pdf.cell(0, 6, "Observações:", 0, 1)
-    pdf.set_font('Arial', '', 10)
-    obs = ""
-    if max_in > 900 or max_out > 900:
-        obs += "- Alerta de Saturação: O tráfego atingiu níveis muito próximos à capacidade física do link (>90%).\n"
-        obs += "- Nota-se o \"achatamento\" das ondas nos picos, indicando que a demanda pode ser maior do que a banda contratada, gerando possíveis lentidões ou filas em horários de pico.\n"
-    else:
-        obs += "- O link operou dentro da normalidade, suportando a demanda sem saturação severa ou gargalos contínuos.\n"
-    
-    pdf.multi_cell(0, 6, obs)
-    pdf.ln(10)
+        pdf.add_page()
+        pdf.secao_titulo(f'{num_secao}.', f'Análise de Tráfego - {inst}')
 
-    # Alertas
-    pdf.capitulo_titulo("4. Resumo de Ocorrências e Alertas")
-    pdf.tabela_alertas(lista_alertas)
+        pdf.subsecao_titulo(f'{num_secao}.1. Dados Cadastrais')
+        pdf.ln(1)
+        pdf.linha_dado('Instituição:',          inst,    fill=True)
+        pdf.linha_dado('Período de Referência:', periodo, fill=False)
+        pdf.linha_dado('Capacidade do Link:',   cap,     fill=True)
+        pdf.ln(6)
 
-    # Conclusão
-    pdf.capitulo_titulo("5. Conclusão")
-    pdf.corpo_texto(
-        f"A análise dos dados de tráfego coletados no período de {infos_relatorio['periodo'].replace(' a ', ' a ')} "
-        f"permite traçar um diagnóstico sobre a conectividade da {infos_relatorio['instituicao']}.\n\n"
-        "Recomenda-se a verificação constante dos alertas listados acima (caso existam ocorrências) "
-        "para garantir a disponibilidade e a continuidade dos serviços essenciais operados pela unidade."
-    )
+        pdf.subsecao_titulo(f'{num_secao}.2. Gráfico de Tráfego')
+        pdf.ln(2)
 
-    return pdf.output(dest='S')
+        caminho_tmp = _salvar_grafico_temp(grafico_bytes)
+        if caminho_tmp:
+            try:
+                # Checa espaco pro grafico
+                pdf.checar_espaco(85)
+                pdf.image(caminho_tmp, x=10, w=190)
+            except Exception as e:
+                pdf.corpo_texto(f'[Erro ao inserir gráfico: {e}]')
+            finally:
+                try:
+                    os.remove(caminho_tmp)
+                except OSError:
+                    pass
+        else:
+            pdf.set_fill_color(245, 245, 245)
+            pdf.set_font('Arial', 'I', 9)
+            pdf.set_text_color(130, 130, 130)
+            pdf.cell(0, 18, 'Gráfico indisponível para este período.', border=1,
+                     new_x='LMARGIN', new_y='NEXT', align='C', fill=True)
+        pdf.ln(6)
+
+        pdf.subsecao_titulo(f'{num_secao}.3. Métricas de Tráfego')
+        pdf.ln(2)
+        pdf.tabela_stats(stats)
+        pdf.ln(2)
+        pdf.bloco_observacao(stats)
+        pdf.ln(4)
+
+        pdf.subsecao_titulo(f'{num_secao}.4. Resumo de Ocorrências e Alertas')
+        pdf.ln(2)
+        pdf.tabela_alertas(alertas)
+        pdf.ln(2)
+        
+        pdf.subsecao_titulo(f'{num_secao}.5. Conclusão ({inst})')
+        texto_conclusao = TEXTOS['conclusao'].replace('{periodo}', periodo).replace('{instituicao}', inst)
+        pdf.corpo_texto(texto_conclusao)
+
+        num_secao += 1
+
+    saida = pdf.output(dest='S')
+    
+    if isinstance(saida, str):
+        return saida.encode('latin-1')
+    return bytes(saida)
