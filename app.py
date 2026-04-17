@@ -71,6 +71,7 @@ st.markdown("""
     .card-icon.pdf { color: #E74C3C; }
     .card-icon.net { color: #3498DB; }
     .card-icon.hist { color: #F39C12; }
+    .card-icon.invoice { color: #27AE60; }
     
     .card-title {
         font-size: 1.3rem;
@@ -469,7 +470,7 @@ def gerar_grafico_matplotlib(df_final, nome_inst, capacidade_str, periodo, dt_in
     ax.set_xlabel('Data', color='#aaaaaa', fontsize=9)
     ax.set_ylabel('Tráfego (Mbps)', color='#aaaaaa', fontsize=9)
     
-    titulo = f'Tráfego de Rede - {nome_inst}'
+    titulo = f'Tráfego de Rede — {nome_inst}'
     subtitulo = f'{periodo}  |  Capacidade: {capacidade_str}'
     ax.set_title(f'{titulo}\n{subtitulo}', color='white', fontsize=10,
                  fontweight='bold', pad=10)
@@ -560,7 +561,7 @@ st.markdown("<hr style='margin-top: 15px; margin-bottom: 30px; border-color: #55
 if page == "Home":
     st.markdown("<h3 style='text-align: center; margin-bottom: 40px; color: var(--text-color);'>Selecione um Módulo</h3>", unsafe_allow_html=True)
     
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     
     with c1:
         st.markdown("""
@@ -575,6 +576,17 @@ if page == "Home":
 
     with c2:
         st.markdown("""
+        <a href="?page=Faturas" target="_self" class="card-link">
+        <div class="card-container">
+        <i class="fa-solid fa-file-invoice-dollar card-icon invoice"></i>
+        <div class="card-title">Gerar Faturas</div>
+        <p class="card-desc">Crie faturas comerciais personalizadas para as instituições vinculadas.</p>
+        </div>
+        </a>
+        """, unsafe_allow_html=True)
+
+    with c3:
+        st.markdown("""
         <a href="?page=Cadastros" target="_self" class="card-link">
         <div class="card-container">
         <i class="fa-solid fa-network-wired card-icon net"></i>
@@ -584,7 +596,7 @@ if page == "Home":
         </a>
         """, unsafe_allow_html=True)
 
-    with c3:
+    with c4:
         st.markdown("""
         <a href="?page=Historico" target="_self" class="card-link">
         <div class="card-container">
@@ -1067,3 +1079,149 @@ elif page == "Historico":
                     )
             else:
                 st.error(f"Arquivo apagado do disco: {inst} ({periodo})")
+
+elif page == "Faturas":
+    col_tit, col_btn = st.columns([8, 2])
+    with col_tit:
+        st.markdown("<h3 style='margin-bottom: 20px;'><i class='fa-solid fa-file-invoice-dollar' style='color: #27AE60; margin-right: 10px;'></i> Gerar Fatura Comercial</h3>", unsafe_allow_html=True)
+    with col_btn:
+        st.markdown('<div style="text-align: right; margin-top: 5px;"><a href="?page=Home" target="_self" class="btn-voltar"><i class="fa-solid fa-arrow-left"></i> Voltar</a></div>', unsafe_allow_html=True)
+    
+    # Inicia tabela de faturas automaticamente se ela ainda não existir no banco
+    with db.conectar() as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS faturas_cadastradas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                link_id INTEGER UNIQUE NOT NULL,
+                fatura_para TEXT NOT NULL,
+                cnpj TEXT,
+                cep TEXT,
+                endereco TEXT,
+                numero TEXT,
+                cidade TEXT,
+                uf TEXT,
+                FOREIGN KEY (link_id) REFERENCES links (id)
+            )
+        ''')
+        conn.commit()
+
+    tab_gerar, tab_cadastrar = st.tabs(["Emitir Fatura", "Cadastrar Dados do Cliente"])
+
+    # ========================================================
+    # ABA: CADASTRAR PERFIL COMERCIAL
+    # ========================================================
+    with tab_cadastrar:
+        with db.conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, nome_instituicao FROM links ORDER BY nome_instituicao")
+            links_cadastrados = cursor.fetchall()
+
+        if not links_cadastrados:
+            st.info("Nenhuma Instituição cadastrada ainda. Vá para 'Gerenciar Instituições' no Início para cadastrar um cliente.")
+        else:
+            opcoes_inst = {nome: id_link for id_link, nome in links_cadastrados}
+            
+            with st.form("form_cad_fatura"):
+                st.markdown("#### Salvar Perfil de Faturamento")
+                st.caption("Preencha os dados abaixo uma única vez. Eles ficarão salvos para emitir faturas no futuro.")
+                
+                inst_sel = st.selectbox("Vincular à Instituição do Sistema:", list(opcoes_inst.keys()))
+                fatura_para = st.text_input("Nome que vai em 'FATURA PARA':", placeholder="EX: FUNDAÇÃO UNIVERSIDADE ESTADUAL DO CEARÁ")
+                
+                c1, c2 = st.columns(2)
+                with c1:
+                    cnpj = st.text_input("CNPJ do Cliente:", placeholder="00.000.000/0001-00")
+                    cep = st.text_input("CEP:", placeholder="60.000-000")
+                with c2:
+                    endereco = st.text_input("Endereço:", placeholder="AV. DR. SILAS MUNGUBA")
+                    numero = st.text_input("Número:", placeholder="1700")
+                    
+                c3, c4 = st.columns(2)
+                with c3:
+                    cidade = st.text_input("Cidade:", value="FORTALEZA")
+                with c4:
+                    uf = st.text_input("Estado:", value="CE")
+                    
+                submit_cad = st.form_submit_button("Salvar / Atualizar Cadastro", type="primary")
+                
+                if submit_cad:
+                    if not fatura_para.strip():
+                        st.error("Por favor, preencha ao menos o campo 'FATURA PARA'.")
+                    else:
+                        id_link = opcoes_inst[inst_sel]
+                        with db.conectar() as conn:
+                            # O REPLACE atualiza automaticamente os dados se o cliente já existir
+                            conn.execute('''
+                                INSERT OR REPLACE INTO faturas_cadastradas 
+                                (link_id, fatura_para, cnpj, cep, endereco, numero, cidade, uf)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            ''', (id_link, fatura_para, cnpj, cep, endereco, numero, cidade, uf))
+                            conn.commit()
+                        st.toast(f"Dados comerciais salvos para {inst_sel}!")
+                        time.sleep(1.2)
+                        st.rerun()
+
+    # ========================================================
+    # ABA: GERAR FATURA RÁPIDA
+    # ========================================================
+    with tab_gerar:
+        with db.conectar() as conn:
+            # Puxa apenas as instituições que já tiveram o perfil comercial cadastrado
+            faturas_salvas = conn.execute('''
+                SELECT f.link_id, l.nome_instituicao, f.fatura_para, f.cnpj, f.cep, f.endereco, f.numero, f.cidade, f.uf
+                FROM faturas_cadastradas f
+                JOIN links l ON f.link_id = l.id
+                ORDER BY l.nome_instituicao
+            ''').fetchall()
+
+        if not faturas_salvas:
+            st.info("Nenhum perfil de fatura foi salvo ainda. Vá na aba 'Cadastrar Dados do Cliente' ao lado para iniciar.")
+        else:
+            mapa_faturas = {row[1]: row for row in faturas_salvas}
+            
+            with st.form("form_gerar_fatura"):
+                st.markdown("#### <i class='fa-solid fa-user' style='color: #3498DB; margin-right: 8px;'></i> Selecionar Instituição", unsafe_allow_html=True)
+                cliente_nome_sel = st.selectbox("Cliente:", list(mapa_faturas.keys()))
+                
+                st.divider()
+                st.markdown("#### <i class='fa-solid fa-calendar-days' style='color: #F39C12; margin-right: 8px;'></i> Detalhes do Mês", unsafe_allow_html=True)
+                c_f3, c_f4, c_f5 = st.columns(3)
+                with c_f3:
+                    fatura_num = st.text_input("Nº da Fatura:", value="3")
+                with c_f4:
+                    fatura_data = st.date_input("Data da Fatura", value=date.today())
+                with c_f5:
+                    fatura_venc = st.date_input("Data de Vencimento", value=date.today() + timedelta(days=15))
+                    
+                submit_fatura = st.form_submit_button("Gerar Fatura em PDF", type="primary")
+                
+            if submit_fatura:
+                # Pega os dados amarrados à instituição selecionada
+                dados_cli = mapa_faturas[cliente_nome_sel]
+                
+                dados_fatura = {
+                    'cliente_nome': dados_cli[2], # fatura_para
+                    'cliente_cnpj': dados_cli[3], # cnpj
+                    'cliente_cep': dados_cli[4],  # cep
+                    'cliente_end': dados_cli[5],  # endereco
+                    'cliente_num': dados_cli[6],  # numero
+                    'cliente_cidade': dados_cli[7],# cidade
+                    'cliente_uf': dados_cli[8],   # uf
+                    'fatura_num': fatura_num,
+                    'fatura_data': fatura_data.strftime("%d/%m/%Y"),
+                    'fatura_venc': fatura_venc.strftime("%d/%m/%Y")
+                }
+                
+                try:
+                    from gerador_fatura import criar_fatura_pdf
+                    pdf_bytes = criar_fatura_pdf(dados_fatura)
+                    
+                    st.success("Fatura processada e gerada com sucesso!")
+                    st.download_button(
+                        label="Baixar Fatura Agora",
+                        data=pdf_bytes,
+                        file_name=f"Fatura_Gigafor_{fatura_num}_{cliente_nome_sel.replace(' ', '_')}.pdf",
+                        mime="application/pdf"
+                    )
+                except Exception as e:
+                    st.error(f"Erro ao gerar a fatura: {e}")
