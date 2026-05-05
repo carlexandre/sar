@@ -45,6 +45,41 @@ def init_db():
                 FOREIGN KEY (link_id) REFERENCES links (id)
             )
         ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS historico_relatorios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                link_id INTEGER NOT NULL,
+                data_geracao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                periodo_texto TEXT NOT NULL,
+                caminho_arquivo TEXT NOT NULL,
+                FOREIGN KEY (link_id) REFERENCES links (id)
+            )
+        ''')
+
+        # Tabela de Perfis Comerciais (Faturas)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS faturas_cadastradas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                link_id INTEGER UNIQUE NOT NULL,
+                fatura_para TEXT NOT NULL,
+                cnpj TEXT,
+                cep TEXT,
+                endereco TEXT,
+                numero TEXT,
+                cidade TEXT,
+                uf TEXT,
+                email_contato TEXT,
+                FOREIGN KEY (link_id) REFERENCES links (id)
+            )
+        ''')
+        
+        # Tenta adicionar a coluna caso a tabela já exista de versões anteriores
+        try:
+            cursor.execute("ALTER TABLE faturas_cadastradas ADD COLUMN email_contato TEXT")
+        except sqlite3.OperationalError:
+            pass
+        
         conn.commit()
 
 # --- FUNÇÕES PARA GRUPOS ---

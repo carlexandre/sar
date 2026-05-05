@@ -8,15 +8,11 @@ import base64
 import time
 from pyzabbix import ZabbixAPI
 from dotenv import load_dotenv
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta
 import pandas as pd
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 from gerador_relatorio import criar_pdf_completo
 import database as db
-from io import BytesIO
+import zabbix_service # Nosso novo serviço isolado
 
 # Garante que a pasta de PDFs exista
 PASTA_PDFS = "pdfs_gerados"
@@ -48,16 +44,17 @@ st.markdown("""
     .card-container {
         border: 1px solid rgba(128, 128, 128, 0.3);
         border-radius: 0.75rem;
-        padding: 2.5rem 1.5rem;
+        padding: 2rem 1.2rem;
         text-align: center;
         background-color: var(--secondary-background-color);
         transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
         cursor: pointer;
-        height: 100%;
+        height: 290px; /* Altura fixa garante alinhamento perfeito em qualquer tela */
         display: flex;
         flex-direction: column;
-        justify-content: center;
+        justify-content: flex-start;
         align-items: center;
+        box-sizing: border-box;
     }
     .card-link:hover .card-container {
         transform: translateY(-5px) scale(1.02);
@@ -66,7 +63,8 @@ st.markdown("""
     }
     .card-icon {
         font-size: 55px;
-        margin-bottom: 20px;
+        margin-bottom: 15px;
+        margin-top: 10px;
     }
     .card-icon.pdf { color: #E74C3C; }
     .card-icon.net { color: #3498DB; }
@@ -74,10 +72,15 @@ st.markdown("""
     .card-icon.invoice { color: #27AE60; }
     
     .card-title {
-        font-size: 1.3rem;
+        font-size: 1.25rem;
         font-weight: 700;
         margin-bottom: 10px;
         color: var(--text-color);
+        min-height: 60px; /* Espaço suficiente para até 2 linhas de texto */
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        line-height: 1.2;
     }
     .card-desc {
         color: var(--text-color);
@@ -380,120 +383,6 @@ if conn:
 else:
     zapi, session = None, None
 
-
-# ==========================================================
-# GERADOR DE GRÁFICO COM MATPLOTLIB
-# ==========================================================
-def gerar_grafico_matplotlib(df_final, nome_inst, capacidade_str, periodo, dt_inicio, dt_fim):
-    """
-    Gera um gráfico de tráfego profissional usando matplotlib.
-    """
-    fig, ax = plt.subplots(figsize=(12, 3.8))
-    fig.patch.set_facecolor('#1a1a2e')
-    ax.set_facecolor('#1e1e3a')
-
-    # Linhas de tráfego (restaurando as linhas e a transparência como antes)
-    ax.plot(df_final['clock'], df_final['recv_mbps'],
-            color='#2ECC71', linewidth=1.2, label='Download (Entrada)', alpha=0.95)
-    ax.plot(df_final['clock'], df_final['sent_mbps'],
-            color='#3498DB', linewidth=1.2, label='Upload (Saída)', alpha=0.95)
-
-    # Preenchimento sob as curvas
-    ax.fill_between(df_final['clock'], df_final['recv_mbps'], alpha=0.12, color='#2ECC71')
-    ax.fill_between(df_final['clock'], df_final['sent_mbps'], alpha=0.12, color='#3498DB')
-
-    # --- AJUSTES DO EIXO X (LIMITES E MARCADORES) ---
-    inicio_ts = pd.to_datetime(int(pd.Timestamp(dt_inicio).timestamp()), unit='s')
-    fim_ts = pd.to_datetime(int(pd.Timestamp(dt_fim).timestamp()) + 86400 - 1, unit='s')
-    
-    # Faz o gráfico grudar e esticar perfeitamente entre as datas iniciais e finais
-    ax.set_xlim(inicio_ts, fim_ts)
-
-    # Gera uma lista de datas dia a dia para mostrar todos os dias
-    dias_total = (fim_ts - inicio_ts).days
-    freq_dias = '1D' if dias_total <= 60 else f'{max(1, dias_total // 30)}D'
-    
-    ticks_datas = pd.date_range(start=inicio_ts.normalize(), end=fim_ts.normalize(), freq=freq_dias).tolist()
-    
-    ultimo_dia = fim_ts.normalize()
-    if ultimo_dia not in ticks_datas:
-        ticks_datas.append(ultimo_dia)
-            
-    ax.set_xticks(ticks_datas)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%d/%m'))
-    
-    # Aplica a rotação vertical de 90 graus
-    plt.xticks(rotation=90)
-
-    # Personalização inteligente: a cada 5 dias fica maior, o resto do intervalo fica menor
-    for i, label in enumerate(ax.xaxis.get_ticklabels()):
-        if i % 5 == 0 or i == len(ticks_datas) - 1:
-            label.set_fontsize(9)
-            label.set_color('#ffffff') # Cor forte/clara
-            label.set_fontweight('bold')
-        else:
-            label.set_fontsize(6)
-            label.set_color('#777777') # Cor fraca/discreta nos intervalos
-            label.set_fontweight('normal')
-    
-    # --- AJUSTES DINÂMICOS DO EIXO Y ---
-    max_trafego = max(df_final['recv_mbps'].max(), df_final['sent_mbps'].max()) if not df_final.empty else 0
-    
-    # Lógica progressiva em etapas de 100 até 1000
-    if max_trafego <= 100:
-        y_max = 100
-    elif max_trafego <= 200:
-        y_max = 200
-    elif max_trafego <= 300:
-        y_max = 300
-    elif max_trafego <= 400:
-        y_max = 400
-    elif max_trafego <= 500:
-        y_max = 500
-    elif max_trafego <= 600:
-        y_max = 600
-    elif max_trafego <= 700:
-        y_max = 700
-    elif max_trafego <= 800:
-        y_max = 800
-    elif max_trafego <= 900:
-        y_max = 900
-    elif max_trafego <= 1000:
-        y_max = 1000
-    else:
-        # Passou de 1000 Mbps, volta à regra de 5% de margem no teto para não cortar o pico
-        y_max = max_trafego * 1.05
-        
-    ax.set_ylim(0, y_max)
-    plt.yticks(color='#cccccc', fontsize=8)
-
-    ax.set_xlabel('Data', color='#aaaaaa', fontsize=9)
-    ax.set_ylabel('Tráfego (Mbps)', color='#aaaaaa', fontsize=9)
-    
-    titulo = f'Tráfego de Rede — {nome_inst}'
-    subtitulo = f'{periodo}  |  Capacidade: {capacidade_str}'
-    ax.set_title(f'{titulo}\n{subtitulo}', color='white', fontsize=10,
-                 fontweight='bold', pad=10)
-
-    ax.legend(loc='upper right', fontsize=8,
-              facecolor='#2c2c54', edgecolor='#555', labelcolor='white')
-
-    ax.tick_params(colors='#cccccc', which='both')
-    for spine in ax.spines.values():
-        spine.set_edgecolor('#444')
-    ax.grid(axis='y', color='#333', linewidth=0.6, linestyle='--', alpha=0.7)
-    ax.grid(axis='x', color='#333', linewidth=0.3, linestyle=':', alpha=0.5)
-
-    plt.tight_layout(pad=1.5)
-
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight',
-                facecolor=fig.get_facecolor())
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-
 # ==========================================
 # NAVBAR (CABEÇALHO GLOBAL E MODAL HTML)
 # ==========================================
@@ -678,137 +567,16 @@ elif page == "Gerar":
                     nomes_arquivos = []
                     periodo_str = f"{dt_inicio.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}"
                     
-                    ts_from = int(pd.Timestamp(dt_inicio).timestamp())
-                    ts_till = int(pd.Timestamp(dt_fim).timestamp()) + 86400
-
-                    def buscar_dados(api, item_id, t_from, t_till):
-                        dados = api.history.get(itemids=[item_id], time_from=t_from, time_till=t_till, output='extend', history=3)
-                        eh_tendencia = False
-                        
-                        precisa_trend = False
-                        if not dados:
-                            precisa_trend = True
-                        else:
-                            primeiro_registro = min(int(d['clock']) for d in dados)
-                            if (primeiro_registro - t_from) > 86400:
-                                precisa_trend = True
-
-                        if precisa_trend:
-                            dados = api.trend.get(itemids=[item_id], time_from=t_from, time_till=t_till, output=['clock', 'value_avg', 'value_max'])
-                            eh_tendencia = True
-                            
-                        return dados, eh_tendencia
-
-                    # Loop para buscar e gerar os itens de CADA instituição selecionada
+                    # Loop para buscar e gerar os itens de CADA instituição selecionada via Serviço Externo
                     for inst_id in inst_ids_selecionadas:
-                        with db.conectar() as conn:
-                            cursor = conn.cursor()
-                            cursor.execute("SELECT nome_instituicao, host_id, item_down_id, item_up_id, capacidade_str FROM links WHERE id = ?", (inst_id,))
-                            dados_link = cursor.fetchone()
+                        dados_inst = zabbix_service.processar_dados_instituicao(zapi, inst_id, dt_inicio, dt_fim)
                         
-                        nome_inst, host_id, item_down, item_up, cap_str = dados_link
-                        nomes_arquivos.append(nome_inst)
-                        
-                        raw_in, is_trend_in = buscar_dados(zapi, item_down, ts_from, ts_till)
-                        raw_out, is_trend_out = buscar_dados(zapi, item_up, ts_from, ts_till)
-
-                        if not raw_in or not raw_out:
-                            st.warning(f"Dados de tráfego não encontrados para {nome_inst} neste período. Ignorando...")
+                        if not dados_inst:
+                            st.warning(f"Dados de tráfego não encontrados para o ID {inst_id} neste período. A ignorar...")
                             continue
-
-                        def calc_stats(dados_raw, is_trend):
-                            df = pd.DataFrame(dados_raw)
-                            if is_trend:
-                                return pd.to_numeric(df['value_max']).max(), pd.to_numeric(df['value_avg']).mean()
-                            df['value'] = pd.to_numeric(df['value'])
-                            return df['value'].max(), df['value'].mean()
-
-                        pico_in, media_in = calc_stats(raw_in, is_trend_in)
-                        pico_out, media_out = calc_stats(raw_out, is_trend_out)
-
-                        estatisticas_reais = {
-                            'media_in': media_in / 1_000_000, 'max_in': pico_in / 1_000_000,
-                            'media_out': media_out / 1_000_000, 'max_out': pico_out / 1_000_000
-                        }
-
-                        def prep_df(dados, is_trend):
-                            df = pd.DataFrame(dados)
-                            df['clock'] = pd.to_datetime(pd.to_numeric(df['clock']), unit='s')
-                            df['value'] = pd.to_numeric(df['value_max']) if is_trend else pd.to_numeric(df['value'])
-                            return df[['clock', 'value']]
-
-                        df_final = pd.merge(
-                            prep_df(raw_in, is_trend_in),
-                            prep_df(raw_out, is_trend_out),
-                            on='clock', how='outer',
-                            suffixes=('_in', '_out')
-                        ).sort_values('clock')
-                        
-                        # Preenche os "buracos" de tempo (ffill) para a linha não ficar caindo para zero e formar um bloco sólido
-                        df_final['value_in'] = df_final['value_in'].ffill().fillna(0)
-                        df_final['value_out'] = df_final['value_out'].ffill().fillna(0)
-                        
-                        df_final['recv_mbps'] = df_final['value_in'] / 1_000_000
-                        df_final['sent_mbps'] = df_final['value_out'] / 1_000_000
-
-                        infos = {
-                            'instituicao': nome_inst,
-                            'interface': "Interface de Borda (Banco de Dados)",
-                            'periodo': periodo_str,
-                            'capacidade': cap_str 
-                        }
-
-                        grafico_bytes = gerar_grafico_matplotlib(
-                            df_final=df_final,
-                            nome_inst=nome_inst,
-                            capacidade_str=cap_str,
-                            periodo=infos['periodo'],
-                            dt_inicio=dt_inicio,
-                            dt_fim=dt_fim
-                        )
-
-                        alertas_reais = []
-                        eventos_problema = zapi.event.get(hostids=[host_id], time_from=ts_from, time_till=ts_till, output=['eventid', 'name', 'clock', 'r_eventid'], value=1, sortfield='clock')
-                        r_event_ids = [e['r_eventid'] for e in eventos_problema if e.get('r_eventid') and e.get('r_eventid') != '0']
-                        
-                        mapa_recuperacao = {}
-                        if r_event_ids:
-                            eventos_recuperacao = zapi.event.get(eventids=r_event_ids, output=['eventid', 'clock'])
-                            mapa_recuperacao = {r['eventid']: int(r['clock']) for r in eventos_recuperacao}
-
-                        for e in eventos_problema:
-                            trigger_name = e['name'].lower()
-                            termos_permitidos = ['bandwidth', 'uptime', 'restart']
-                            if not any(termo in trigger_name for termo in termos_permitidos):
-                                continue
-
-                            inicio = int(e['clock'])
-                            r_id = e.get('r_eventid')
-                            dur_str = "Ativo/S.Rec."
-                            if r_id and r_id in mapa_recuperacao:
-                                duracao_segundos = mapa_recuperacao[r_id] - inicio
-                                dias, resto = divmod(duracao_segundos, 86400)
-                                horas, resto = divmod(resto, 3600)
-                                minutos, segundos = divmod(resto, 60)
-                                partes = []
-                                if dias > 0: partes.append(f"{dias}d")
-                                if horas > 0: partes.append(f"{horas}h")
-                                if minutos > 0: partes.append(f"{minutos}m")
-                                if not partes: partes.append(f"{segundos}s")
-                                dur_str = " ".join(partes)
                             
-                            alertas_reais.append({
-                                'data': pd.to_datetime(inicio, unit='s').tz_localize('UTC').tz_convert('America/Fortaleza').strftime('%d/%m %H:%M'),
-                                'trigger': e['name'], 'duracao': dur_str, 'host': nome_inst
-                            })
-
-                        # Adiciona os dados na lista para mandar para o gerador de PDF multi-institucional
-                        lista_dados_relatorio.append({
-                            'grafico_bytes': grafico_bytes,
-                            'infos': infos,
-                            'alertas': alertas_reais,
-                            'stats': estatisticas_reais
-                        })
+                        nomes_arquivos.append(dados_inst['infos']['instituicao'])
+                        lista_dados_relatorio.append(dados_inst)
                     
                     if not lista_dados_relatorio:
                         st.error("Nenhuma das instituições possui dados no Zabbix para este período.")
@@ -864,9 +632,15 @@ elif page == "Faturas":
                 numero TEXT,
                 cidade TEXT,
                 uf TEXT,
+                email_contato TEXT,
                 FOREIGN KEY (link_id) REFERENCES links (id)
             )
         ''')
+        # Tenta atualizar o schema caso a tabela tenha sido criada numa versão anterior sem o email
+        try:
+            conn.execute("ALTER TABLE faturas_cadastradas ADD COLUMN email_contato TEXT")
+        except:
+            pass
         conn.commit()
 
     tab_gerar, tab_cadastrar = st.tabs(["Emitir Fatura", "Cadastrar Dados do Cliente"])
@@ -906,6 +680,8 @@ elif page == "Faturas":
                 with c4:
                     uf = st.text_input("Estado:", value="CE")
                     
+                email_contato = st.text_input("E-mail para Envio Automático (NOC / Financeiro):", placeholder="noc@instituicao.edu.br")
+                    
                 submit_cad = st.form_submit_button("Salvar / Atualizar Cadastro", type="primary")
                 
                 if submit_cad:
@@ -917,9 +693,9 @@ elif page == "Faturas":
                             # O REPLACE atualiza automaticamente os dados se o cliente já existir
                             conn.execute('''
                                 INSERT OR REPLACE INTO faturas_cadastradas 
-                                (link_id, fatura_para, cnpj, cep, endereco, numero, cidade, uf)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                            ''', (id_link, fatura_para, cnpj, cep, endereco, numero, cidade, uf))
+                                (link_id, fatura_para, cnpj, cep, endereco, numero, cidade, uf, email_contato)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ''', (id_link, fatura_para, cnpj, cep, endereco, numero, cidade, uf, email_contato))
                             conn.commit()
                         st.toast(f"Dados comerciais salvos para {inst_sel}!")
                         time.sleep(1.2)
@@ -1053,7 +829,7 @@ elif page == "Cadastros":
                 dict_itens = {i['name']: i['itemid'] for i in itens_brutos}
                 
                 with st.form("form_link_adicionar"):
-                    nome_personalizado = st.text_input("Nome da Instituição (para o relatório):", placeholder="Ex: UECE Campus Itaperi")
+                    nome_personalizado = st.text_input("Nome da Instituição:", placeholder="Ex: UECE Campus Itaperi")
                     
                     if not dict_itens:
                         st.warning("Nenhuma interface encontrada neste host.")
@@ -1091,17 +867,18 @@ elif page == "Cadastros":
                     curr_grupo_id, curr_nome, curr_host_id, curr_item_down_id, curr_item_up_id, curr_cap = cursor.fetchone()
 
                 idx_grupo = list(dict_grupos.values()).index(curr_grupo_id) if curr_grupo_id in dict_grupos.values() else 0
-                grupo_sel_edit = st.selectbox("Grupo:", options=list(dict_grupos.keys()), index=idx_grupo, key="edit_grupo")
+                grupo_sel_edit = st.selectbox("Grupo:", options=list(dict_grupos.keys()), index=idx_grupo, key=f"edit_grupo_{inst_id_selecionada}")
                 
-                idx_host = list(dict_hosts.values()).index(curr_host_id) if curr_host_id in dict_hosts.values() else 0
-                host_sel_edit = st.selectbox("Host no Zabbix:", options=list(dict_hosts.keys()), index=idx_host, key="edit_host")
+                # Modificação: Host agora é apenas visual (desabilitado)
+                curr_host_name = next((nome for nome, hid in dict_hosts.items() if hid == curr_host_id), "Host Desconhecido")
+                st.text_input("Host no Zabbix:", value=curr_host_name, disabled=True, key=f"edit_host_{inst_id_selecionada}")
+                host_id_real_edit = curr_host_id
                 
-                host_id_real_edit = dict_hosts[host_sel_edit]
                 itens_brutos_edit = get_items(zapi, host_id_real_edit)
                 dict_itens_edit = {i['name']: i['itemid'] for i in itens_brutos_edit}
                 
-                with st.form("form_link_editar"):
-                    nome_personalizado_edit = st.text_input("Nome da Instituição (para o relatório):", value=curr_nome, key="edit_nome_input")
+                with st.form(f"form_link_editar_{inst_id_selecionada}"):
+                    nome_personalizado_edit = st.text_input("Nome da Instituição:", value=curr_nome, key=f"edit_nome_input_{inst_id_selecionada}")
                     
                     if not dict_itens_edit:
                         st.warning("Nenhuma interface encontrada neste host.")
@@ -1110,10 +887,10 @@ elif page == "Cadastros":
                         idx_down = list(dict_itens_edit.values()).index(curr_item_down_id) if curr_item_down_id in dict_itens_edit.values() else 0
                         idx_up = list(dict_itens_edit.values()).index(curr_item_up_id) if curr_item_up_id in dict_itens_edit.values() else 0
                         
-                        item_down_sel_edit = st.selectbox("Interface de DOWNLOAD (Entrada):", options=list(dict_itens_edit.keys()), index=idx_down, key="edit_down")
-                        item_up_sel_edit = st.selectbox("Interface de UPLOAD (Saída):", options=list(dict_itens_edit.keys()), index=idx_up, key="edit_up")
+                        item_down_sel_edit = st.selectbox("Interface de DOWNLOAD (Entrada):", options=list(dict_itens_edit.keys()), index=idx_down, key=f"edit_down_{inst_id_selecionada}_{host_id_real_edit}")
+                        item_up_sel_edit = st.selectbox("Interface de UPLOAD (Saída):", options=list(dict_itens_edit.keys()), index=idx_up, key=f"edit_up_{inst_id_selecionada}_{host_id_real_edit}")
                     
-                    cap_edit = st.text_input("Capacidade (ex: 1 Gbps, 500 Mbps)", value=curr_cap, key="edit_cap")
+                    cap_edit = st.text_input("Capacidade (ex: 1 Gbps, 500 Mbps)", value=curr_cap, key=f"edit_cap_{inst_id_selecionada}")
                     
                     col_btn1, col_space, col_btn2 = st.columns([2, 5, 2])
                     with col_btn1:
