@@ -1,18 +1,21 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import os
+import json
 import requests
 import re
 import urllib3
 import base64
 import time
+import datetime
 from pyzabbix import ZabbixAPI
 from dotenv import load_dotenv
 from datetime import date, timedelta
 import pandas as pd
 from gerador_relatorio import criar_pdf_completo
 import database as db
-import zabbix_service # Nosso novo serviço isolado
+import zabbix_service
+import agendamento_service
 
 # Garante que a pasta de PDFs exista
 PASTA_PDFS = "pdfs_gerados"
@@ -66,10 +69,11 @@ st.markdown("""
         margin-bottom: 15px;
         margin-top: 10px;
     }
-    .card-icon.pdf { color: #E74C3C; }
-    .card-icon.net { color: #3498DB; }
-    .card-icon.hist { color: #F39C12; }
+    .card-icon.pdf     { color: #E74C3C; }
+    .card-icon.net     { color: #3498DB; }
+    .card-icon.hist    { color: #F39C12; }
     .card-icon.invoice { color: #27AE60; }
+    .card-icon.auto    { color: #9B59B6; }
     
     .card-title {
         font-size: 1.25rem;
@@ -282,6 +286,58 @@ st.markdown("""
         font-size: 1.05rem !important;
         font-weight: 600 !important;
     }
+
+    /* CUSTOM ALERTS (FontAwesome) */
+    .custom-alert {
+        padding: 1rem 1.2rem;
+        border-radius: 0.5rem;
+        margin-bottom: 1rem;
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        font-size: 0.95rem;
+        line-height: 1.5;
+        color: var(--text-color);
+        background-color: var(--secondary-background-color);
+        border: 1px solid rgba(128, 128, 128, 0.2);
+    }
+    .custom-alert.warning { border-left: 4px solid #F39C12; }
+    .custom-alert.warning .custom-alert-icon { color: #F39C12; }
+
+    .custom-alert.success { border-left: 4px solid #27AE60; }
+    .custom-alert.success .custom-alert-icon { color: #27AE60; }
+
+    .custom-alert.info { border-left: 4px solid #3498DB; }
+    .custom-alert.info .custom-alert-icon { color: #3498DB; }
+
+    .custom-alert-icon {
+        font-size: 1.3rem;
+        margin-top: 2px;
+    }
+
+    /* BADGE DE STATUS (Agendamentos) */
+    .badge-ativo {
+        background: rgba(39, 174, 96, 0.15);
+        color: #27AE60;
+        border: 1px solid rgba(39, 174, 96, 0.4);
+        border-radius: 20px;
+        padding: 4px 10px;
+        font-size: 0.8rem;
+        font-weight: 700;
+        display: inline-flex;
+        align-items: center;
+    }
+    .badge-pausado {
+        background: rgba(128, 128, 128, 0.1);
+        color: #888;
+        border: 1px solid rgba(128, 128, 128, 0.3);
+        border-radius: 20px;
+        padding: 4px 10px;
+        font-size: 0.8rem;
+        font-weight: 700;
+        display: inline-flex;
+        align-items: center;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -430,6 +486,7 @@ def renderizar_navbar():
 <li><strong>Gerar Relatório:</strong> O módulo principal. Permite selecionar uma instituição já cadastrada e definir um intervalo de datas. O sistema consulta a API do Zabbix automaticamente e monta um documento PDF formatado com gráficos limpos, picos de tráfego e resumo de quedas de link (downtime) desse período.</li>
 <li><strong>Gerenciar Instituições:</strong> É o módulo de administração. Aqui você pode criar grupos (como GigaFOR, CDC, etc) e vincular o nome de uma instituição aos seus respectivos <code>Hosts</code> e <code>Interfaces</code> que já estão a ser monitorados lá dentro do Zabbix.</li>
 <li><strong>Histórico:</strong> Mantém um acervo permanente de todos os relatórios em PDF que já foram gerados. Permite buscas e filtragens avançadas para realizar novos downloads instantâneos sem precisar consultar o Zabbix repetidas vezes.</li>
+<li><strong>Automação de E-mail:</strong> Agenda o envio automático mensal de relatórios e faturas via crontab do Linux. Configure as instituições, o dia do mês, o horário e as preferências de fatura — o SAR cuida do restante.</li>
 </ul>
 <hr style="border-color: rgba(128,128,128,0.2); margin: 25px 0;">
 <h4><i class="fa-solid fa-chart-pie" style="color: #2ECC71; margin-right: 8px;"></i> Entendendo o Relatório e as Interfaces</h4>
@@ -450,7 +507,7 @@ st.markdown("<hr style='margin-top: 15px; margin-bottom: 30px; border-color: #55
 if page == "Home":
     st.markdown("<h3 style='text-align: center; margin-bottom: 40px; color: var(--text-color);'>Selecione um Módulo</h3>", unsafe_allow_html=True)
     
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     
     with c1:
         st.markdown("""
@@ -492,6 +549,20 @@ if page == "Home":
         <i class="fa-solid fa-folder-open card-icon hist"></i>
         <div class="card-title">Histórico</div>
         <p class="card-desc">Acesse o repositório de relatórios gerados anteriormente pelo sistema.</p>
+        </div>
+        </a>
+        """, unsafe_allow_html=True)
+
+    with c5:
+        # Conta agendamentos ativos para exibir no badge
+        ags_ativos = len(db.listar_agendamentos(apenas_ativos=True))
+        badge_html = f" <span style='font-size:0.65rem; background:#9B59B6; color:white; border-radius:20px; padding:1px 7px; vertical-align:middle;'>{ags_ativos} ativo{'s' if ags_ativos != 1 else ''}</span>" if ags_ativos > 0 else ""
+        st.markdown(f"""
+        <a href="?page=Automacao" target="_self" class="card-link">
+        <div class="card-container">
+        <i class="fa-solid fa-robot card-icon auto"></i>
+        <div class="card-title">Automação de E-mail{badge_html}</div>
+        <p class="card-desc">Agende o envio mensal automático de relatórios e faturas por e-mail.</p>
         </div>
         </a>
         """, unsafe_allow_html=True)
@@ -545,7 +616,6 @@ elif page == "Gerar":
             else:
                 opcoes_inst = {f"{row['grupo']} - {row['nome']}": row['id'] for _, row in df_links.iterrows()}
                 
-                # Multiselect para suportar até 3 instituições
                 insts_selecionadas_nomes = st.multiselect(
                     "Selecione até 3 Instituições:", 
                     options=list(opcoes_inst.keys()),
@@ -567,7 +637,6 @@ elif page == "Gerar":
                     nomes_arquivos = []
                     periodo_str = f"{dt_inicio.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}"
                     
-                    # Loop para buscar e gerar os itens de CADA instituição selecionada via Serviço Externo
                     for inst_id in inst_ids_selecionadas:
                         dados_inst = zabbix_service.processar_dados_instituicao(zapi, inst_id, dt_inicio, dt_fim)
                         
@@ -582,7 +651,6 @@ elif page == "Gerar":
                         st.error("Nenhuma das instituições possui dados no Zabbix para este período.")
                         st.stop()
 
-                    # Chama a função do PDF (agora passando a lista inteira)
                     pdf_bytes = criar_pdf_completo(
                         lista_dados=lista_dados_relatorio,
                         dt_inicio=dt_inicio,
@@ -619,7 +687,6 @@ elif page == "Faturas":
     with col_btn:
         st.markdown('<div style="text-align: right; margin-top: 5px;"><a href="?page=Home" target="_self" class="btn-voltar"><i class="fa-solid fa-arrow-left"></i> Voltar</a></div>', unsafe_allow_html=True)
     
-    # Inicia tabela de faturas automaticamente se ela ainda não existir no banco
     with db.conectar() as conn:
         conn.execute('''
             CREATE TABLE IF NOT EXISTS faturas_cadastradas (
@@ -636,7 +703,6 @@ elif page == "Faturas":
                 FOREIGN KEY (link_id) REFERENCES links (id)
             )
         ''')
-        # Tenta atualizar o schema caso a tabela tenha sido criada numa versão anterior sem o email
         try:
             conn.execute("ALTER TABLE faturas_cadastradas ADD COLUMN email_contato TEXT")
         except:
@@ -650,47 +716,40 @@ elif page == "Faturas":
     # ========================================================
     with tab_cadastrar:
         with db.conectar() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, nome_instituicao FROM links ORDER BY nome_instituicao")
-            links_cadastrados = cursor.fetchall()
+            links_raw_fat = conn.execute("""
+                SELECT l.id, l.nome_instituicao, g.nome 
+                FROM links l LEFT JOIN grupos g ON l.grupo_id = g.id
+                ORDER BY g.nome, l.nome_instituicao
+            """).fetchall()
 
-        if not links_cadastrados:
-            st.info("Nenhuma Instituição cadastrada ainda. Vá para 'Gerenciar Instituições' no Início para cadastrar um cliente.")
+        if not links_raw_fat:
+            st.info("Nenhuma instituição cadastrada ainda.")
         else:
-            opcoes_inst = {nome: id_link for id_link, nome in links_cadastrados}
+            opcoes_inst = {f"{r[2] or 'Sem Grupo'} - {r[1]}": r[0] for r in links_raw_fat}
             
-            with st.form("form_cad_fatura"):
-                st.markdown("#### Salvar Perfil de Faturamento")
-                st.caption("Preencha os dados abaixo uma única vez. Eles ficarão salvos para emitir faturas no futuro.")
+            with st.form("form_cadastrar_perfil"):
+                inst_sel = st.selectbox("Instituição:", list(opcoes_inst.keys()))
                 
-                inst_sel = st.selectbox("Vincular à Instituição do Sistema:", list(opcoes_inst.keys()))
-                fatura_para = st.text_input("Nome que vai em 'FATURA PARA':", placeholder="EX: FUNDAÇÃO UNIVERSIDADE ESTADUAL DO CEARÁ")
+                col_fp1, col_fp2 = st.columns(2)
+                with col_fp1:
+                    fatura_para = st.text_input("Nome para a Fatura (Razão Social):", placeholder="Ex: FUNDAÇÃO UNIVERSIDADE X")
+                    cnpj = st.text_input("CNPJ:", placeholder="00.000.000/0001-00")
+                    cep = st.text_input("CEP:", placeholder="00000-000")
+                    email_contato = st.text_input("E-mail de Contato (para envio automático):", placeholder="noc@instituicao.edu.br")
+                with col_fp2:
+                    endereco = st.text_input("Logradouro:", placeholder="Av. Principal")
+                    numero = st.text_input("Número:", placeholder="S/N")
+                    cidade = st.text_input("Cidade:", placeholder="Fortaleza")
+                    uf = st.text_input("UF:", placeholder="CE", max_chars=2)
+
+                submit_perfil = st.form_submit_button("Salvar Perfil Comercial", type="primary")
                 
-                c1, c2 = st.columns(2)
-                with c1:
-                    cnpj = st.text_input("CNPJ do Cliente:", placeholder="00.000.000/0001-00")
-                    cep = st.text_input("CEP:", placeholder="60.000-000")
-                with c2:
-                    endereco = st.text_input("Endereço:", placeholder="AV. DR. SILAS MUNGUBA")
-                    numero = st.text_input("Número:", placeholder="1700")
-                    
-                c3, c4 = st.columns(2)
-                with c3:
-                    cidade = st.text_input("Cidade:", value="FORTALEZA")
-                with c4:
-                    uf = st.text_input("Estado:", value="CE")
-                    
-                email_contato = st.text_input("E-mail para Envio Automático (NOC / Financeiro):", placeholder="noc@instituicao.edu.br")
-                    
-                submit_cad = st.form_submit_button("Salvar / Atualizar Cadastro", type="primary")
-                
-                if submit_cad:
+                if submit_perfil:
                     if not fatura_para.strip():
-                        st.error("Por favor, preencha ao menos o campo 'FATURA PARA'.")
+                        st.error("O campo 'Nome para a Fatura' é obrigatório.")
                     else:
                         id_link = opcoes_inst[inst_sel]
                         with db.conectar() as conn:
-                            # O REPLACE atualiza automaticamente os dados se o cliente já existir
                             conn.execute('''
                                 INSERT OR REPLACE INTO faturas_cadastradas 
                                 (link_id, fatura_para, cnpj, cep, endereco, numero, cidade, uf, email_contato)
@@ -706,7 +765,6 @@ elif page == "Faturas":
     # ========================================================
     with tab_gerar:
         with db.conectar() as conn:
-            # Puxa apenas as instituições que já tiveram o perfil comercial cadastrado
             faturas_salvas = conn.execute('''
                 SELECT f.link_id, l.nome_instituicao, f.fatura_para, f.cnpj, f.cep, f.endereco, f.numero, f.cidade, f.uf
                 FROM faturas_cadastradas f
@@ -736,17 +794,16 @@ elif page == "Faturas":
                 submit_fatura = st.form_submit_button("Gerar Fatura em PDF", type="primary")
                 
             if submit_fatura:
-                # Pega os dados amarrados à instituição selecionada
                 dados_cli = mapa_faturas[cliente_nome_sel]
                 
                 dados_fatura = {
-                    'cliente_nome': dados_cli[2], # fatura_para
-                    'cliente_cnpj': dados_cli[3], # cnpj
-                    'cliente_cep': dados_cli[4],  # cep
-                    'cliente_end': dados_cli[5],  # endereco
-                    'cliente_num': dados_cli[6],  # numero
-                    'cliente_cidade': dados_cli[7],# cidade
-                    'cliente_uf': dados_cli[8],   # uf
+                    'cliente_nome': dados_cli[2],
+                    'cliente_cnpj': dados_cli[3],
+                    'cliente_cep': dados_cli[4],
+                    'cliente_end': dados_cli[5],
+                    'cliente_num': dados_cli[6],
+                    'cliente_cidade': dados_cli[7],
+                    'cliente_uf': dados_cli[8],
                     'fatura_num': fatura_num,
                     'fatura_data': fatura_data.strftime("%d/%m/%Y"),
                     'fatura_venc': fatura_venc.strftime("%d/%m/%Y")
@@ -869,7 +926,6 @@ elif page == "Cadastros":
                 idx_grupo = list(dict_grupos.values()).index(curr_grupo_id) if curr_grupo_id in dict_grupos.values() else 0
                 grupo_sel_edit = st.selectbox("Grupo:", options=list(dict_grupos.keys()), index=idx_grupo, key=f"edit_grupo_{inst_id_selecionada}")
                 
-                # Modificação: Host agora é apenas visual (desabilitado)
                 curr_host_name = next((nome for nome, hid in dict_hosts.items() if hid == curr_host_id), "Host Desconhecido")
                 st.text_input("Host no Zabbix:", value=curr_host_name, disabled=True, key=f"edit_host_{inst_id_selecionada}")
                 host_id_real_edit = curr_host_id
@@ -1007,3 +1063,324 @@ elif page == "Historico":
                     )
             else:
                 st.error(f"Arquivo apagado do disco: {inst} ({periodo})")
+
+# ==========================================
+# NOVA PÁGINA: AUTOMAÇÃO DE E-MAIL
+# ==========================================
+elif page == "Automacao":
+    col_tit, col_btn = st.columns([8, 2])
+    with col_tit:
+        st.markdown("<h3 style='margin-bottom: 20px;'><i class='fa-solid fa-robot' style='color: #9B59B6; margin-right: 10px;'></i> Automação de E-mail</h3>", unsafe_allow_html=True)
+    with col_btn:
+        st.markdown('<div style="text-align: right; margin-top: 5px;"><a href="?page=Home" target="_self" class="btn-voltar"><i class="fa-solid fa-arrow-left"></i> Voltar</a></div>', unsafe_allow_html=True)
+
+    # ── Aviso de status do cron (Substituído por HTML c/ FontAwesome) ──
+    cron_ok = agendamento_service.verificar_cron_disponivel()
+    if not cron_ok:
+        st.markdown("""
+        <div class="custom-alert warning">
+            <i class="fa-solid fa-triangle-exclamation custom-alert-icon"></i>
+            <div><strong>Cron não detectado neste sistema.</strong> Os agendamentos serão salvos no banco de dados, mas a sincronização automática com o crontab não estará disponível. Execute <code>agendamento_service.atualizar_crontab()</code> manualmente quando migrar para Linux.</div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        entradas_sar = agendamento_service.ler_entradas_sar()
+        n_entradas = len(entradas_sar)
+        if n_entradas > 0:
+            st.markdown(f"""
+            <div class="custom-alert success">
+                <i class="fa-solid fa-circle-check custom-alert-icon"></i>
+                <div>Cron ativo com <strong>{n_entradas} entrada(s) SAR</strong> registrada(s) no sistema.</div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div class="custom-alert info">
+                <i class="fa-solid fa-circle-info custom-alert-icon"></i>
+                <div>Cron disponível. Nenhuma entrada SAR no crontab ainda.</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.divider()
+
+    # Abas limpas (Sem emojis, design profissional)
+    tab_novo, tab_ativos, tab_diagnostico = st.tabs([
+        "Novo Agendamento",
+        "Agendamentos Ativos",
+        "Diagnóstico"
+    ])
+
+    # ============================================================
+    # ABA 1: NOVO AGENDAMENTO
+    # ============================================================
+    with tab_novo:
+        with db.conectar() as conn:
+            todas_insts = conn.execute('''
+                SELECT l.id, l.nome_instituicao, g.nome, f.email_contato
+                FROM links l
+                LEFT JOIN grupos g ON l.grupo_id = g.id
+                LEFT JOIN faturas_cadastradas f ON l.id = f.link_id
+                ORDER BY g.nome, l.nome_instituicao
+            ''').fetchall()
+
+        if not todas_insts:
+            st.markdown("""
+            <div class="custom-alert info">
+                <i class="fa-solid fa-building custom-alert-icon"></i>
+                <div>Nenhuma instituição cadastrada ainda. Vá em <strong>Gerenciar Instituições</strong> primeiro.</div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.stop()
+
+        opcoes_inst_auto = {
+            f"{row[2] or 'Sem Grupo'} — {row[1]}": row[0]
+            for row in todas_insts
+        }
+        mapa_emails = {row[0]: row[3] for row in todas_insts}
+
+        st.markdown("#### <i class='fa-solid fa-building-circle-check' style='color: #9B59B6; margin-right: 8px;'></i> Selecionar Instituições", unsafe_allow_html=True)
+
+        insts_selecionadas = st.multiselect(
+            "Instituições que receberão o envio automático:",
+            options=list(opcoes_inst_auto.keys()),
+            placeholder="Selecione uma ou mais instituições...",
+            key="auto_multiselect"
+        )
+
+        ids_selecionados = [opcoes_inst_auto[n] for n in insts_selecionadas]
+
+        if insts_selecionadas:
+            sem_email = [
+                n for n in insts_selecionadas
+                if not mapa_emails.get(opcoes_inst_auto[n])
+            ]
+            if sem_email:
+                nomes_sem = [n.split(" — ", 1)[-1] for n in sem_email]
+                st.markdown(f"""
+                <div class="custom-alert warning">
+                    <i class="fa-solid fa-envelope-circle-xmark custom-alert-icon"></i>
+                    <div>As seguintes instituições <strong>não possuem e-mail cadastrado</strong> e serão puladas no envio: <strong>{', '.join(nomes_sem)}</strong>.<br>Cadastre o e-mail em <strong>Gerar Faturas → Cadastrar Dados do Cliente</strong>.</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        st.divider()
+        st.markdown("#### <i class='fa-regular fa-clock' style='color: #3498DB; margin-right: 8px;'></i> Agendamento", unsafe_allow_html=True)
+
+        col_dia, col_hora = st.columns(2)
+        with col_dia:
+            dia_envio = st.number_input(
+                "Dia do mês para disparo:",
+                min_value=1, max_value=28, value=5,
+                help="Use até dia 28 para garantir execução em todos os meses."
+            )
+        with col_hora:
+            horario_obj = st.time_input(
+                "Horário de disparo:",
+                value=datetime.time(8, 0),
+                step=300,  # passos de 5 minutos
+                help="Horário local do servidor Linux onde o SAR está hospedado."
+            )
+
+        st.divider()
+        st.markdown("#### <i class='fa-solid fa-file-invoice-dollar' style='color: #27AE60; margin-right: 8px;'></i> Configurações de Fatura", unsafe_allow_html=True)
+
+        incluir_fatura = st.toggle("Incluir Fatura Comercial no envio", value=True)
+
+        fatura_num_prefixo = "FAT"
+        fatura_venc_dia = 15
+
+        if incluir_fatura:
+            col_fp1, col_fp2 = st.columns(2)
+            with col_fp1:
+                fatura_num_prefixo = st.text_input(
+                    "Prefixo do Número da Fatura:",
+                    value="FAT",
+                    max_chars=10,
+                    help="O número final será: PREFIXO-MMAAAA-ID  →  Ex: FAT-052025-3"
+                )
+                st.caption(f"Exemplo de número gerado: `{fatura_num_prefixo or 'FAT'}-052025-1`")
+            with col_fp2:
+                fatura_venc_dia = st.number_input(
+                    "Dia de vencimento da fatura:",
+                    min_value=1, max_value=28, value=15,
+                    help="Dia do mês em que a fatura vencerá."
+                )
+
+        if insts_selecionadas:
+            horario_str = horario_obj.strftime("%H:%M")
+            nomes_preview = [n.split(" — ", 1)[-1] for n in insts_selecionadas]
+            anexos_preview = "Relatório Técnico" + (" + Fatura Comercial" if incluir_fatura else "")
+            
+            st.divider()
+            st.markdown("#### <i class='fa-solid fa-eye' style='color: #F39C12; margin-right: 8px;'></i> Prévia do Agendamento", unsafe_allow_html=True)
+            st.markdown(f"""
+            | Campo | Valor |
+            |---|---|
+            | **Disparo** | Todo dia **{dia_envio}** de cada mês, às **{horario_str}** |
+            | **Instituições** | {', '.join(nomes_preview)} |
+            | **Anexos** | {anexos_preview} |
+            | **Número da fatura** | `{fatura_num_prefixo or 'FAT'}-MMAAAA-ID` (gerado automaticamente) |
+            | **Vencimento** | Dia **{fatura_venc_dia}** de cada mês |
+            """)
+
+        st.divider()
+
+        # Botão limpo, sem emoji
+        btn_salvar = st.button(
+            "Salvar Agendamento e Ativar",
+            type="primary",
+            disabled=not bool(insts_selecionadas),
+            use_container_width=True
+        )
+
+        if btn_salvar and insts_selecionadas:
+            horario_str = horario_obj.strftime("%H:%M")
+            novo_id = db.salvar_agendamento(
+                link_ids=ids_selecionados,
+                dia_envio=int(dia_envio),
+                horario=horario_str,
+                incluir_fatura=incluir_fatura,
+                fatura_num_prefixo=fatura_num_prefixo or "FAT",
+                fatura_venc_dia=int(fatura_venc_dia),
+            )
+            
+            if cron_ok:
+                sucesso_cron, msg_cron = agendamento_service.atualizar_crontab()
+                if sucesso_cron:
+                    st.toast(f"Agendamento #{novo_id} criado e crontab atualizado!")
+                else:
+                    st.toast(f"Agendamento salvo no banco, mas falha no crontab: {msg_cron}")
+            else:
+                st.toast(f"Agendamento #{novo_id} salvo. Ative o cron manualmente.")
+            
+            time.sleep(1.5)
+            st.rerun()
+
+    # ============================================================
+    # ABA 2: AGENDAMENTOS ATIVOS
+    # ============================================================
+    with tab_ativos:
+        agendamentos = db.listar_agendamentos()
+
+        if not agendamentos:
+            st.markdown("""
+            <div class="custom-alert info">
+                <i class="fa-solid fa-folder-open custom-alert-icon"></i>
+                <div>Nenhum agendamento configurado ainda. Use a aba <strong>Novo Agendamento</strong> para criar o primeiro.</div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"**{len(agendamentos)} agendamento(s) cadastrado(s)**")
+            st.divider()
+
+            for ag in agendamentos:
+                ag_id, link_ids_json, dia, horario, incluir_fatura, fatura_prefixo, fatura_venc_dia, ativo = ag
+
+                try:
+                    ids_lista = json.loads(link_ids_json)
+                except (json.JSONDecodeError, TypeError):
+                    ids_lista = []
+
+                nomes_inst = db.buscar_nomes_links(ids_lista)
+                nomes_str = ", ".join(nomes_inst) if nomes_inst else "Instituições não encontradas"
+                nomes_curto = nomes_str[:55] + "..." if len(nomes_str) > 55 else nomes_str
+
+                # Badges atualizados com FontAwesome HTML
+                badge_status = (
+                    '<span class="badge-ativo"><i class="fa-solid fa-circle-play" style="margin-right: 5px;"></i> Ativo</span>'
+                    if ativo else
+                    '<span class="badge-pausado"><i class="fa-solid fa-circle-pause" style="margin-right: 5px;"></i> Pausado</span>'
+                )
+                expander_label = f"#{ag_id} | Dia {dia} às {horario} — {nomes_curto}"
+
+                with st.expander(expander_label, expanded=False):
+                    st.markdown(badge_status, unsafe_allow_html=True)
+                    st.markdown("")
+
+                    col_info1, col_info2 = st.columns(2)
+                    with col_info1:
+                        st.markdown(f"<i class='fa-regular fa-calendar-check' style='color: #3498DB; margin-right: 6px;'></i><strong>Disparo:</strong> Todo dia <strong>{dia}</strong> de cada mês, às <strong>{horario}</strong>", unsafe_allow_html=True)
+                        st.markdown(f"<i class='fa-solid fa-building-user' style='color: #9B59B6; margin-right: 6px;'></i><strong>Instituições ({len(ids_lista)}):</strong> {nomes_str}", unsafe_allow_html=True)
+                    with col_info2:
+                        st.markdown(f"<i class='fa-solid fa-paperclip' style='color: #F39C12; margin-right: 6px;'></i><strong>Fatura:</strong> {'Sim' if incluir_fatura else 'Não'}", unsafe_allow_html=True)
+                        if incluir_fatura:
+                            st.markdown(f"<i class='fa-solid fa-hashtag' style='color: #2ECC71; margin-right: 6px;'></i><strong>Prefixo:</strong> <code>{fatura_prefixo}</code> &nbsp;|&nbsp; <i class='fa-regular fa-calendar-days' style='color: #E74C3C; margin-left: 5px; margin-right: 5px;'></i><strong>Vencimento:</strong> Dia {fatura_venc_dia}", unsafe_allow_html=True)
+
+                    st.markdown("")
+                    col_a, col_b, col_spacer = st.columns([2, 2, 6])
+
+                    with col_a:
+                        novo_estado = not bool(ativo)
+                        label_toggle = "Pausar" if ativo else "Reativar"
+                        if st.button(label_toggle, key=f"toggle_{ag_id}", use_container_width=True):
+                            db.toggle_agendamento(ag_id, novo_estado)
+                            if cron_ok:
+                                agendamento_service.atualizar_crontab()
+                            st.rerun()
+
+                    with col_b:
+                        if st.button("Excluir", key=f"del_{ag_id}", use_container_width=True):
+                            db.deletar_agendamento(ag_id)
+                            if cron_ok:
+                                agendamento_service.atualizar_crontab()
+                            st.toast(f"Agendamento #{ag_id} excluído.")
+                            time.sleep(0.8)
+                            st.rerun()
+
+    # ============================================================
+    # ABA 3: DIAGNÓSTICO
+    # ============================================================
+    with tab_diagnostico:
+        st.markdown("#### <i class='fa-solid fa-terminal' style='color: #888; margin-right: 8px;'></i> Estado do Crontab", unsafe_allow_html=True)
+
+        if not cron_ok:
+            st.markdown("""
+            <div class="custom-alert warning">
+                <i class="fa-solid fa-circle-xmark custom-alert-icon"></i>
+                <div>Cron não disponível neste sistema operacional.</div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            entradas = agendamento_service.ler_entradas_sar()
+            if not entradas:
+                st.markdown("""
+                <div class="custom-alert info">
+                    <i class="fa-solid fa-clock-rotate-left custom-alert-icon"></i>
+                    <div>Nenhuma entrada SAR encontrada no crontab. Salve um agendamento para ativá-las.</div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"**{len(entradas)} entrada(s) SAR ativa(s) no crontab do sistema:**")
+                st.code("\n".join(entradas), language="bash")
+
+            st.divider()
+            st.markdown("#### <i class='fa-solid fa-rotate' style='color: #3498DB; margin-right: 8px;'></i> Forçar Ressincronização", unsafe_allow_html=True)
+            st.caption(
+                "Útil se o crontab foi editado manualmente ou se os agendamentos estão "
+                "desincronizados com o banco de dados."
+            )
+            if st.button("Ressincronizar Crontab Agora", use_container_width=False):
+                sucesso, msg = agendamento_service.atualizar_crontab()
+                if sucesso:
+                    st.markdown(f"""
+                    <div class="custom-alert success">
+                        <i class="fa-solid fa-check custom-alert-icon"></i>
+                        <div>{msg}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div class="custom-alert warning">
+                        <i class="fa-solid fa-xmark custom-alert-icon"></i>
+                        <div>{msg}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+        st.divider()
+        st.markdown("#### <i class='fa-solid fa-file-code' style='color: #2ECC71; margin-right: 8px;'></i> Caminho do Script de Rotina", unsafe_allow_html=True)
+        st.code(agendamento_service.SCRIPT_PATH, language="bash")
+        st.caption("Este é o caminho absoluto que será inserido nas entradas do crontab.")
+
+        st.markdown("#### <i class='fa-brands fa-python' style='color: #F1C40F; margin-right: 8px;'></i> Python Utilizado", unsafe_allow_html=True)
+        st.code(agendamento_service.PYTHON_PATH, language="bash")
+        st.caption("Garanta que este interpretador tem acesso a todos os pacotes do projeto.")
